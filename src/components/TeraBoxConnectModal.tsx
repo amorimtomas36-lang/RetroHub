@@ -57,6 +57,7 @@ export const TeraBoxConnectModal: React.FC<TeraBoxConnectModalProps> = ({
   const [deviceInfo, setDeviceInfo] = useState<TeraBoxDeviceCodeInfo | null>(null);
   const [qrLoading, setQrLoading] = useState(false);
   const pollTimerRef = useRef<number | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const exchangedCodeRef = useRef<string | null>(null);
 
   const stopPolling = () => {
@@ -83,6 +84,8 @@ export const TeraBoxConnectModal: React.FC<TeraBoxConnectModalProps> = ({
 
     const handleMessage = async (event: MessageEvent) => {
       if (!isTrustedTeraBoxOrigin(event.origin)) return;
+      // Only accept OAuth messages sent by the official login iframe itself.
+      if (!iframeRef.current || event.source !== iframeRef.current.contentWindow) return;
 
       let payload: Record<string, unknown> | null = null;
       if (typeof event.data === 'string') {
@@ -316,6 +319,7 @@ export const TeraBoxConnectModal: React.FC<TeraBoxConnectModalProps> = ({
                     )}
                     {iframeUrl && (
                       <iframe
+                        ref={iframeRef}
                         src={iframeUrl}
                         title="Login Oficial TeraBox"
                         className="w-full h-full border-0"
