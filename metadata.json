@@ -1,0 +1,6 @@
+{
+  "name": "RetroHub",
+  "description": "Site de emulação retro multi-console com EmulatorJS, suporte a 45 emuladores automáticos, remapeamento de controles e save states via IndexedDB.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
