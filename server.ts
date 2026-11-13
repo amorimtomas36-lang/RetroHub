@@ -1236,6 +1236,48 @@ async function startServer() {
     if (typeof answer !== 'string' || !answer.trim()) throw new Error('O fornecedor de IA devolveu uma resposta vazia.');
     return answer.trim().slice(0, 12000);
   };
+
+  type AiProviderHealth = { connected: boolean; message: string };
+  let aiProviderHealthCache: { expiresAt: number; health: AiProviderHealth } | null = null;
+  const checkAiProvider = async (): Promise<AiProviderHealth> => {
+    const config = getAiConfig();
+    if (!config.configured) {
+      return { connected: false, message: 'Falta configurar a chave de API no servidor.' };
+    }
+    if (aiProviderHealthCache && aiProviderHealthCache.expiresAt > Date.now()) {
+      return aiProviderHealthCache.health;
+    }
+
+    let health: AiProviderHealth;
+    try {
+      // OpenAI-compatible providers expose GET /models. This checks connectivity and
+      // authentication without submitting a prompt or consuming inference credits.
+      const response = await fetch(`${config.baseUrl}/models`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${config.apiKey}`, Accept: 'application/json' },
+        signal: AbortSignal.timeout(12000),
+      });
+      if (response.ok) {
+        health = { connected: true, message: 'Ligação e autenticação do fornecedor confirmadas.' };
+      } else if (response.status === 401 || response.status === 403) {
+        health = { connected: false, message: 'O fornecedor recusou a chave. Confirma a chave guardada no Render.' };
+      } else if (response.status === 429) {
+        health = { connected: false, message: 'O fornecedor limitou temporariamente os pedidos de verificação.' };
+      } else {
+        health = { connected: false, message: `O fornecedor respondeu com erro HTTP ${response.status}.` };
+      }
+    } catch (error) {
+      health = {
+        connected: false,
+        message: error instanceof Error && error.name === 'TimeoutError'
+          ? 'A ligação ao fornecedor demorou demasiado tempo.'
+          : 'Não foi possível contactar o fornecedor de IA.',
+      };
+    }
+    aiProviderHealthCache = { expiresAt: Date.now() + 30000, health };
+    return health;
+  };
+
   const saveAiSession = async (session: { id: string; userId: string; mode: 'chat' | 'debate'; title: string; messages: Array<{ role: 'user' | 'assistant'; content: string }> }) => {
     const updatedAt = new Date().toISOString();
     const stored = { ...session, updatedAt };
@@ -1260,9 +1302,28 @@ async function startServer() {
     }
   };
 
-  app.get('/api/ai/status', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
+  app.get('/api/ai/status', requireAuth, async (_req: AuthenticatedRequest, res: Response) => {
     const config = getAiConfig();
-    res.json({ configured: config.configured, provider: config.provider, defaultModel: config.defaultModel, models: config.models, storage: databasePool ? 'Neon Postgres' : 'Temporário (memória do servidor)' });
+    const providerHealth = await checkAiProvider();
+    let storage = 'Temporário (memória do servidor)';
+    if (databasePool) {
+      try {
+        await databasePool.query('SELECT state_key FROM public.retrohub_state LIMIT 1');
+        storage = 'Neon Postgres';
+      } catch (error) {
+        console.error('AI history storage health check failed:', error instanceof Error ? error.message : 'unknown error');
+        storage = 'Neon indisponível';
+      }
+    }
+    res.json({
+      configured: config.configured,
+      connected: providerHealth.connected,
+      providerMessage: providerHealth.message,
+      provider: config.provider,
+      defaultModel: config.defaultModel,
+      models: config.models,
+      storage,
+    });
   });
 
   app.get('/api/ai/history', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
