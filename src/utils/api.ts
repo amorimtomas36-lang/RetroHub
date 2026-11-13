@@ -1,3 +1,5 @@
+import { cacheGameRom, getCachedGameRom } from './indexedDb';
+
 export interface AuthUser {
   id: string;
   username: string;
@@ -247,6 +249,21 @@ export async function saveGameToLibrary(params: {
 }
 
 export async function downloadSavedLibraryRom(item: LibraryGameItem): Promise<File> {
+  // Reuse a local copy first. This avoids another cloud download on repeat launches.
+  try {
+    const cached = await getCachedGameRom(
+      item.gameId,
+      item.fileName,
+      item.fileSize,
+      item.addedAt
+    );
+    if (cached) {
+      return new File([cached], item.fileName, { type: 'application/octet-stream' });
+    }
+  } catch {
+    // Private mode, storage quota, or IndexedDB errors should fall back to the cloud.
+  }
+
   const res = await fetch(`/api/library/${encodeURIComponent(item.gameId)}/rom`, {
     credentials: 'include',
     headers: authHeaders(),
@@ -256,6 +273,9 @@ export async function downloadSavedLibraryRom(item: LibraryGameItem): Promise<Fi
     throw new Error('Não foi possível abrir o arquivo salvo.');
   }
   const blob = await res.blob();
+
+  // Save in the background so the first launch is not delayed by local storage writes.
+  void cacheGameRom(item.gameId, item.fileName, item.fileSize, item.addedAt, blob).catch(() => {});
   return new File([blob], item.fileName, { type: 'application/octet-stream' });
 }
 
