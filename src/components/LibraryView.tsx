@@ -1,22 +1,18 @@
 import React, { useMemo, useState } from 'react';
 import {
   Cloud,
-  CloudUpload,
   FileUp,
   FolderOpen,
   HardDrive,
   Play,
   Search,
   Trash2,
-  Unplug,
 } from 'lucide-react';
 import { ConsoleDefinition, getConsoleById } from '../data/consoles';
 import {
   LibraryGameItem,
-  TeraBoxStatus,
-  disconnectTeraBox,
+  StorageStatus,
   downloadSavedLibraryRom,
-  migrateLocalGamesToTeraBox,
   removeGameFromLibrary,
 } from '../utils/api';
 import { formatBytes } from '../utils/romDetector';
@@ -24,28 +20,22 @@ import { formatBytes } from '../utils/romDetector';
 interface LibraryViewProps {
   games: LibraryGameItem[];
   loading: boolean;
-  teraboxStatus: TeraBoxStatus | null;
+  storageStatus: StorageStatus | null;
   onPlaySavedGame: (file: File, consoleDef: ConsoleDefinition, gameId: string) => void;
   onRefreshLibrary: () => Promise<void>;
-  onRefreshTeraBox: () => Promise<void>;
-  onOpenTeraBoxModal: () => void;
   onGoToUpload: () => void;
 }
 
 export const LibraryView: React.FC<LibraryViewProps> = ({
   games,
   loading,
-  teraboxStatus,
+  storageStatus,
   onPlaySavedGame,
   onRefreshLibrary,
-  onRefreshTeraBox,
-  onOpenTeraBoxModal,
   onGoToUpload,
 }) => {
   const [search, setSearch] = useState('');
   const [openingId, setOpeningId] = useState<string | null>(null);
-  const [migrating, setMigrating] = useState(false);
-  const [disconnecting, setDisconnecting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [infoMsg, setInfoMsg] = useState<string | null>(null);
 
@@ -93,42 +83,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     }
   };
 
-  const handleMigrate = async () => {
-    setErrorMsg(null);
-    setInfoMsg(null);
-    setMigrating(true);
-    try {
-      const { migratedCount } = await migrateLocalGamesToTeraBox();
-      await Promise.all([onRefreshLibrary(), onRefreshTeraBox()]);
-      setInfoMsg(
-        migratedCount > 0
-          ? `${migratedCount} jogo(s) enviado(s) para sua conta TeraBox com sucesso.`
-          : 'Nenhum jogo local pendente para envio.'
-      );
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Erro ao migrar jogos para o TeraBox.');
-    } finally {
-      setMigrating(false);
-    }
-  };
-
-  const handleDisconnect = async () => {
-    setErrorMsg(null);
-    setInfoMsg(null);
-    setDisconnecting(true);
-    try {
-      await disconnectTeraBox();
-      await onRefreshTeraBox();
-      setInfoMsg('Conta TeraBox desconectada.');
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Erro ao desconectar TeraBox.');
-    } finally {
-      setDisconnecting(false);
-    }
-  };
-
-  const quotaTotal = teraboxStatus?.account?.quotaTotal;
-  const quotaUsed = teraboxStatus?.account?.quotaUsed;
+  const cloudReady = storageStatus?.configured === true;
 
   return (
     <div className="max-w-6xl space-y-6">
@@ -152,84 +107,27 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         </button>
       </div>
 
-      {/* TeraBox Cloud Storage Integration Card */}
       <div className="rounded-xl border border-white/10 bg-[#141821] p-4 sm:p-5 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-start gap-3.5 min-w-0">
-          <div
-            className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${
-              teraboxStatus?.connected
-                ? 'bg-sky-500/15 border-sky-500/30 text-sky-400'
-                : 'bg-white/5 border-white/10 text-slate-300'
-            }`}
-          >
+          <div className="w-10 h-10 rounded-xl border border-sky-500/30 bg-sky-500/10 text-sky-400 flex items-center justify-center shrink-0">
             <Cloud className="w-5 h-5" />
           </div>
           <div className="min-w-0 space-y-1">
-            {teraboxStatus?.connected ? (
-              <>
-                <div className="text-sm font-semibold text-white flex flex-wrap items-center gap-2">
-                  <span>TeraBox Conectado: {teraboxStatus.account?.uname || 'Conta TeraBox'}</span>
-                  <span className="text-xs font-normal text-emerald-400">
-                    Envio 100% automático ativado
-                  </span>
-                </div>
-                <div className="text-xs text-slate-400 font-mono-tabular">
-                  Pasta na nuvem: {teraboxStatus.appFolder || '/RetroHub'}
-                  {typeof quotaTotal === 'number' && typeof quotaUsed === 'number'
-                    ? ` · Espaço usado: ${formatBytes(quotaUsed)} / ${formatBytes(quotaTotal)}`
-                    : ''}
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="text-sm font-semibold text-white">
-                  Armazenamento em Nuvem TeraBox (1 TB Grátis)
-                </div>
-                <p className="text-xs text-slate-400 max-w-2xl leading-relaxed">
-                  Conecte sua conta gratuita do TeraBox uma única vez. Depois disso, todo jogo que você enviar no site é salvo direto na sua nuvem TeraBox e carregado de lá automaticamente.
-                </p>
-              </>
-            )}
+            <div className="text-sm font-semibold text-white flex flex-wrap items-center gap-2">
+              <span>Armazenamento na Nuvem RetroHub</span>
+              <span className={`text-xs font-normal ${cloudReady ? 'text-emerald-400' : 'text-amber-300'}`}>
+                {cloudReady ? 'Ligado' : 'A verificar configuração'}
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 max-w-2xl leading-relaxed">
+              Os novos jogos são guardados no armazenamento privado da RetroHub. A base de dados guarda as contas e a biblioteca; os ficheiros ficam separados na nuvem.
+            </p>
+            <div className="text-[11px] text-slate-500">
+              {storageStatus?.database || 'Base de dados'} · {storageStatus?.files || 'Armazenamento de ficheiros'}
+            </div>
           </div>
         </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          {teraboxStatus?.connected ? (
-            <>
-              {localGamesCount > 0 && (
-                <button
-                  type="button"
-                  disabled={migrating}
-                  onClick={handleMigrate}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-sky-500 hover:bg-sky-600 disabled:opacity-60 text-white text-xs font-semibold transition-colors whitespace-nowrap"
-                >
-                  <CloudUpload className="w-3.5 h-3.5" />
-                  {migrating
-                    ? 'Enviando...'
-                    : `Enviar ${localGamesCount} jogo(s) locais para meu TeraBox`}
-                </button>
-              )}
-              <button
-                type="button"
-                disabled={disconnecting}
-                onClick={handleDisconnect}
-                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-white/10 text-slate-300 hover:text-red-300 hover:border-red-500/30 text-xs font-medium transition-colors whitespace-nowrap"
-              >
-                <Unplug className="w-3.5 h-3.5" />
-                {disconnecting ? 'Desconectando...' : 'Desconectar'}
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              onClick={onOpenTeraBoxModal}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-sky-500 hover:bg-sky-600 text-white text-xs font-semibold transition-colors whitespace-nowrap"
-            >
-              <Cloud className="w-4 h-4" />
-              Conectar Conta TeraBox
-            </button>
-          )}
-        </div>
+        <div className="text-xs text-slate-400">{games.length} jogo(s) na biblioteca</div>
       </div>
 
       {games.length > 0 && (
@@ -289,7 +187,8 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {filtered.map((item) => {
             const isOpening = openingId === item.gameId;
-            const isTeraBox = item.storageProvider === 'terabox';
+            const isCloud = item.storageProvider === 'neon' || item.storageProvider === 'terabox';
+            const storageLabel = item.storageProvider === 'neon' ? 'Nuvem RetroHub' : item.storageProvider === 'terabox' ? 'Nuvem TeraBox (legado)' : 'Conta local';
             return (
               <div
                 key={item.id}
@@ -316,18 +215,18 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
                     </span>
                     <span
                       className={`inline-flex items-center gap-1 shrink-0 ${
-                        isTeraBox ? 'text-sky-400' : 'text-slate-400'
+                        isCloud ? 'text-sky-400' : 'text-slate-400'
                       }`}
                     >
-                      {isTeraBox ? (
+                      {isCloud ? (
                         <>
                           <Cloud className="w-3 h-3" />
-                          Nuvem TeraBox
+                          {storageLabel}
                         </>
                       ) : (
                         <>
                           <HardDrive className="w-3 h-3" />
-                          Conta local
+                          {storageLabel}
                         </>
                       )}
                     </span>
