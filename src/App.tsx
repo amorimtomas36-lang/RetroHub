@@ -223,9 +223,11 @@ export default function App() {
           refreshLibrary();
           showLibraryNotice(
             'ok',
-            savedGame.storageProvider === 'terabox'
-              ? `"${cleanTitle}" foi salvo automaticamente no seu TeraBox.`
-              : `"${cleanTitle}" foi salvo na sua conta.`,
+            savedGame.storageProvider === 'neon'
+              ? `"${cleanTitle}" foi guardado na nuvem RetroHub.`
+              : savedGame.storageProvider === 'terabox'
+                ? `"${cleanTitle}" continua guardado na sua nuvem TeraBox.`
+                : `"${cleanTitle}" foi salvo na sua conta.`,
             3500
           );
         })
