@@ -746,6 +746,21 @@ async function teraboxDeleteFileBestEffort(userId: string, remotePath?: string):
 async function startServer() {
   ensureStorage();
   await initializeDatabasePersistence();
+  if (databasePool) {
+    await databasePool.query(`
+      CREATE TABLE IF NOT EXISTS public.retrohub_ai_sessions (
+        id UUID PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK (mode IN ('chat', 'debate')),
+        title TEXT NOT NULL,
+        messages JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS retrohub_ai_sessions_user_updated_idx
+        ON public.retrohub_ai_sessions (user_id, updated_at DESC);
+    `);
+  }
   if (process.env.NODE_ENV === 'production') {
     const objectStore = getNeonObjectStorageClient();
     if (!objectStore) {
@@ -1207,6 +1222,152 @@ async function startServer() {
     }
 
     res.json({ migratedCount });
+  });
+
+
+  // Server-side multi-provider AI gateway. Provider credentials never reach the browser.
+  const aiRequests = new Map<string, number[]>();
+  const aiMemorySessions = new Map<string, { id: string; userId: string; mode: 'chat' | 'debate'; title: string; messages: Array<{ role: 'user' | 'assistant'; content: string }>; updatedAt: string }>();
+  const getAiConfig = () => {
+    const apiKey = (process.env.AI_API_KEY || process.env.OPENROUTER_API_KEY || '').trim();
+    const baseUrl = (process.env.AI_API_BASE_URL || process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').trim().replace(/\/+$/, '');
+    const defaultModel = (process.env.AI_DEFAULT_MODEL || 'openrouter/auto').trim();
+    const models = (process.env.AI_MODELS || defaultModel).split(',').map((item) => item.trim()).filter(Boolean).slice(0, 12);
+    let validBase = false;
+    try { const parsed = new URL(baseUrl); validBase = ['http:', 'https:'].includes(parsed.protocol) && Boolean(parsed.hostname); } catch { validBase = false; }
+    return { configured: Boolean(apiKey && validBase), apiKey, baseUrl, defaultModel, models, provider: process.env.AI_PROVIDER || (baseUrl.includes('openrouter.ai') ? 'OpenRouter' : 'OpenAI-compatible / openTPU') };
+  };
+  const checkAiRateLimit = (userId: string) => {
+    const now = Date.now();
+    const recent = (aiRequests.get(userId) || []).filter((stamp) => now - stamp < 60_000);
+    if (recent.length >= 12) return false;
+    recent.push(now); aiRequests.set(userId, recent); return true;
+  };
+  const callAi = async (model: string, messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>) => {
+    const config = getAiConfig();
+    if (!config.configured) throw new Error('O motor de IA não está configurado no servidor.');
+    if (!config.models.includes(model)) throw new Error('Modelo não permitido nesta instalação.');
+    const response = await fetch(`${config.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json', 'HTTP-Referer': process.env.APP_URL || 'https://retrohub-cloud.onrender.com', 'X-Title': 'RetroHub' },
+      body: JSON.stringify({ model, messages, temperature: 0.7, max_tokens: 1400 }),
+      signal: AbortSignal.timeout(90_000),
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      console.error('AI provider request failed:', response.status, body.slice(0, 500));
+      throw new Error(response.status === 429 ? 'O fornecedor de IA está com limite de pedidos. Tenta mais tarde.' : `O fornecedor de IA respondeu com erro (${response.status}).`);
+    }
+    const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const answer = payload.choices?.[0]?.message?.content;
+    if (typeof answer !== 'string' || !answer.trim()) throw new Error('O fornecedor de IA devolveu uma resposta vazia.');
+    return answer.trim().slice(0, 12000);
+  };
+  const saveAiSession = async (session: { id: string; userId: string; mode: 'chat' | 'debate'; title: string; messages: Array<{ role: 'user' | 'assistant'; content: string }> }) => {
+    const updatedAt = new Date().toISOString();
+    if (databasePool) {
+      await databasePool.query(
+        `INSERT INTO public.retrohub_ai_sessions (id, user_id, mode, title, messages, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
+         ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, messages = EXCLUDED.messages, updated_at = NOW()
+         WHERE public.retrohub_ai_sessions.user_id = EXCLUDED.user_id`,
+        [session.id, session.userId, session.mode, session.title, JSON.stringify(session.messages)]
+      );
+    } else {
+      aiMemorySessions.set(session.id, { ...session, updatedAt });
+    }
+  };
+
+  app.get('/api/ai/status', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
+    const config = getAiConfig();
+    res.json({ configured: config.configured, provider: config.provider, defaultModel: config.defaultModel, models: config.models, storage: databasePool ? 'Neon Postgres' : 'Temporário (memória do servidor)' });
+  });
+
+  app.get('/api/ai/history', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      if (databasePool) {
+        const result = await databasePool.query(
+          'SELECT id, mode, title, updated_at FROM public.retrohub_ai_sessions WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 30',
+          [req.user!.id]
+        );
+        res.json({ sessions: result.rows.map((row) => ({ id: row.id, mode: row.mode, title: row.title, updatedAt: new Date(row.updated_at).toISOString() })) });
+      } else {
+        const sessions = [...aiMemorySessions.values()].filter((item) => item.userId === req.user!.id).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 30);
+        res.json({ sessions: sessions.map(({ id, mode, title, updatedAt }) => ({ id, mode, title, updatedAt })) });
+      }
+    } catch (error) {
+      console.error('AI history read failed:', error);
+      res.status(503).json({ error: 'Não foi possível carregar o histórico de IA.' });
+    }
+  });
+
+  app.get('/api/ai/history/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const id = String(req.params.id || '');
+    if (!/^[0-9a-f-]{36}$/i.test(id)) { res.status(400).json({ error: 'Sessão inválida.' }); return; }
+    try {
+      let session: any = null;
+      if (databasePool) {
+        const result = await databasePool.query('SELECT id, mode, messages FROM public.retrohub_ai_sessions WHERE id = $1 AND user_id = $2 LIMIT 1', [id, req.user!.id]);
+        session = result.rows[0] || null;
+      } else {
+        const found = aiMemorySessions.get(id);
+        if (found?.userId === req.user!.id) session = found;
+      }
+      if (!session) { res.status(404).json({ error: 'Sessão não encontrada.' }); return; }
+      res.json({ session: { id: session.id, mode: session.mode, messages: session.messages } });
+    } catch (error) {
+      console.error('AI session read failed:', error);
+      res.status(503).json({ error: 'Não foi possível abrir esta sessão.' });
+    }
+  });
+
+  app.post('/api/ai/chat', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const config = getAiConfig();
+    if (!config.configured) { res.status(503).json({ error: 'O motor de IA ainda não está configurado no servidor.' }); return; }
+    if (!checkAiRateLimit(req.user!.id)) { res.status(429).json({ error: 'Limite temporário de pedidos atingido. Aguarda um minuto.' }); return; }
+    const model = String(req.body?.model || config.defaultModel).trim();
+    const incoming = req.body?.messages;
+    if (!Array.isArray(incoming) || incoming.length < 1 || incoming.length > 12) { res.status(400).json({ error: 'A conversa deve conter entre 1 e 12 mensagens.' }); return; }
+    const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [{ role: 'system', content: 'És o assistente do RetroHub. Responde em português europeu quando o utilizador escrever em português. Sê claro, útil e honesto; não inventes capacidades nem resultados.' }];
+    for (const item of incoming) {
+      if (!item || !['user', 'assistant'].includes(item.role) || typeof item.content !== 'string' || !item.content.trim() || item.content.length > 8000) { res.status(400).json({ error: 'Mensagem inválida ou demasiado longa.' }); return; }
+      messages.push({ role: item.role, content: item.content });
+    }
+    const idRaw = String(req.body?.sessionId || '');
+    const id = idRaw && /^[0-9a-f-]{36}$/i.test(idRaw) ? idRaw : crypto.randomUUID();
+    try {
+      const answer = await callAi(model, messages);
+      const userMessage = [...incoming].reverse().find((item: any) => item.role === 'user')?.content || 'Conversa';
+      const sessionMessages = [...incoming, { role: 'assistant' as const, content: answer }];
+      await saveAiSession({ id, userId: req.user!.id, mode: 'chat', title: String(userMessage).replace(/\\s+/g, ' ').slice(0, 90), messages: sessionMessages });
+      res.json({ sessionId: id, message: answer });
+    } catch (error) {
+      res.status(502).json({ error: error instanceof Error ? error.message : 'Falha no serviço de IA.' });
+    }
+  });
+
+  app.post('/api/ai/debate', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+    const config = getAiConfig();
+    if (!config.configured) { res.status(503).json({ error: 'O motor de IA ainda não está configurado no servidor.' }); return; }
+    if (!checkAiRateLimit(req.user!.id)) { res.status(429).json({ error: 'Limite temporário de pedidos atingido. Aguarda um minuto.' }); return; }
+    const topic = typeof req.body?.topic === 'string' ? req.body.topic.trim() : '';
+    const selected = String(req.body?.model || config.defaultModel).trim();
+    if (!topic || topic.length > 3000 || !config.models.includes(selected)) { res.status(400).json({ error: 'Tema ou modelo inválido.' }); return; }
+    const alternate = config.models.find((item) => item !== selected) || selected;
+    const idRaw = String(req.body?.sessionId || '');
+    const id = idRaw && /^[0-9a-f-]{36}$/i.test(idRaw) ? idRaw : crypto.randomUUID();
+    try {
+      const [pro, contra] = await Promise.all([
+        callAi(selected, [{ role: 'system', content: 'És o primeiro participante de um debate. Defende a perspetiva favorável ao tema com argumentos equilibrados, factuais e concisos.' }, { role: 'user', content: topic }]),
+        callAi(alternate, [{ role: 'system', content: 'És o segundo participante de um debate. Apresenta uma perspetiva crítica ou alternativa, com argumentos equilibrados e concisos.' }, { role: 'user', content: topic }])
+      ]);
+      const verdict = await callAi(selected, [{ role: 'system', content: 'És um juiz imparcial. Compara os dois argumentos, identifica pontos fortes e fracos e apresenta uma síntese. Não declares um vencedor sem justificar.' }, { role: 'user', content: `Tema: ${topic}\n\nParticipante A (${selected}):\n${pro}\n\nParticipante B (${alternate}):\n${contra}\n\nAvalia os argumentos.` }]);
+      const messages = [{ role: 'user' as const, content: 'Tema: ' + topic }, { role: 'assistant' as const, content: selected + '\\n' + pro }, { role: 'assistant' as const, content: alternate + '\\n' + contra }, { role: 'assistant' as const, content: 'AVALIAÇÃO FINAL\\n' + verdict }];
+      await saveAiSession({ id, userId: req.user!.id, mode: 'debate', title: topic.slice(0, 90), messages });
+      res.json({ sessionId: id, title: topic, rounds: [{ model: selected, answer: pro }, { model: alternate, answer: contra }], verdict });
+    } catch (error) {
+      res.status(502).json({ error: error instanceof Error ? error.message : 'Falha ao executar o debate.' });
+    }
   });
 
   app.get('/api/health', (_req: Request, res: Response) => {

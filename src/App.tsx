@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Cloud,
+  BrainCircuit,
   FileUp,
   FolderOpen,
   Gamepad2,
@@ -22,6 +23,7 @@ import {
   getConsoleBySlug,
 } from './data/consoles';
 import { AuthPage } from './components/AuthPage';
+import { AIHubView } from './components/AIHubView';
 import { ConsolePage } from './components/ConsolePage';
 import { ControlsConfigView } from './components/ControlsConfigView';
 import { ActiveRomSession, EmulatorPlayer } from './components/EmulatorPlayer';
@@ -48,6 +50,7 @@ type AppRoute =
   | { view: 'loader' }
   | { view: 'controls'; consoleId?: string }
   | { view: 'saves' }
+  | { view: 'ai' }
   | { view: 'console'; slug: string }
   | { view: 'play'; slug: string };
 
@@ -58,6 +61,7 @@ function parsePathToRoute(pathname: string): AppRoute {
   if (clean === '/carregar-jogo') return { view: 'loader' };
   if (clean === '/controles') return { view: 'controls' };
   if (clean === '/saves') return { view: 'saves' };
+  if (clean === '/ia') return { view: 'ai' };
   if (clean.startsWith('/console/')) {
     const slug = clean.slice('/console/'.length);
     if (getConsoleBySlug(slug)) return { view: 'console', slug };
@@ -311,6 +315,7 @@ export default function App() {
     route.view === 'console' || route.view === 'play' ? route.slug : null;
 
   const renderMainContent = () => {
+    if (route.view === 'ai') return <AIHubView username={user.username} />;
     if (route.view === 'play') {
       if (activeSession) {
         return (
@@ -441,6 +446,14 @@ export default function App() {
               </button>
               <button
                 type="button"
+                onClick={() => navigate('/ia', { view: 'ai' })}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg border border-violet-400/30 bg-violet-500/10 text-violet-200 hover:bg-violet-500/20 text-sm font-medium transition-colors whitespace-nowrap"
+              >
+                <BrainCircuit className="w-4 h-4" />
+                Centro Multi-IA
+              </button>
+              <button
+                type="button"
                 onClick={() => navigate('/controles', { view: 'controls' })}
                 className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg border border-white/15 text-slate-200 hover:text-white hover:bg-white/5 text-sm font-medium transition-colors whitespace-nowrap"
               >
@@ -470,6 +483,13 @@ export default function App() {
                 Jogos adicionados por você ficam salvos para abrir rapidamente sem reenviar o arquivo.
               </p>
             </div>
+            <button
+              type="button"
+              onClick={() => navigate('/ia', { view: 'ai' })}
+              className="px-2.5 py-2 rounded-lg bg-violet-500/15 text-violet-200 text-left font-medium"
+            >
+              Centro IA
+            </button>
             <button
               type="button"
               onClick={() => navigate('/biblioteca', { view: 'library' })}
@@ -645,6 +665,13 @@ export default function App() {
             }`}
           >
             Consoles
+          </a>
+          <a
+            href="/ia"
+            onClick={(e) => { e.preventDefault(); navigate('/ia', { view: 'ai' }); }}
+            className="hover:text-white transition-colors whitespace-nowrap shrink-0"
+          >
+            Centro IA
           </a>
           <a
             href="/biblioteca"
