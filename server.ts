@@ -165,6 +165,13 @@ async function initializeDatabasePersistence() {
   }
 
   await databasePool.query('SELECT 1');
+  await databasePool.query(`
+    CREATE TABLE IF NOT EXISTS public.retrohub_state (
+      state_key TEXT PRIMARY KEY,
+      data JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
   for (const [filePath, stateKey] of DATA_FILE_KEYS.entries()) {
     const result = await databasePool.query<{ data: unknown }>(
       'SELECT data FROM public.retrohub_state WHERE state_key = $1',
