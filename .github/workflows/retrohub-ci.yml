@@ -2,7 +2,7 @@ name: RetroHub CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, feat/neon-cloud-storage]
   push:
     branches: [main, feat/neon-cloud-storage, feat/retrohub-ai-center]
 
