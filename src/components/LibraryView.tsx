@@ -37,7 +37,6 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   const [search, setSearch] = useState('');
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [infoMsg, setInfoMsg] = useState<string | null>(null);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -49,11 +48,6 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         g.fileName.toLowerCase().includes(q)
     );
   }, [games, search]);
-
-  const localGamesCount = useMemo(
-    () => games.filter((g) => g.storageProvider !== 'terabox').length,
-    [games]
-  );
 
   const handleOpen = async (item: LibraryGameItem) => {
     const consoleDef = getConsoleById(item.consoleId);
@@ -93,7 +87,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
             Minha Biblioteca Salva
           </h1>
           <p className="text-sm text-slate-400 mt-1">
-            Todos os jogos adicionados ficam salvos na nuvem. Conecte seu TeraBox para armazenar tudo direto na sua conta grátis automaticamente.
+            Os jogos que adicionares à tua conta ficam guardados na biblioteca RetroHub, com ficheiros na nuvem privada.
           </p>
         </div>
 
@@ -140,12 +134,6 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
             placeholder="Buscar jogo salvo ou console..."
             className="w-full pl-10 pr-4 py-2 rounded-lg bg-[#141821] border border-white/10 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-orange-500"
           />
-        </div>
-      )}
-
-      {infoMsg && (
-        <div className="px-4 py-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-200">
-          {infoMsg}
         </div>
       )}
 
