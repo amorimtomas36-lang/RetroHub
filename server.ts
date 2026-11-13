@@ -1230,7 +1230,7 @@ async function startServer() {
   const aiMemorySessions = new Map<string, { id: string; userId: string; mode: 'chat' | 'debate'; title: string; messages: Array<{ role: 'user' | 'assistant'; content: string }>; updatedAt: string }>();
   const getAiConfig = () => {
     const apiKey = (process.env.AI_API_KEY || process.env.OPENROUTER_API_KEY || '').trim();
-    const baseUrl = (process.env.AI_API_BASE_URL || process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').trim().replace(/\\/+$/, '');
+    const baseUrl = (process.env.AI_API_BASE_URL || process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').trim().replace(/\/+$/, '');
     const defaultModel = (process.env.AI_DEFAULT_MODEL || 'openrouter/auto').trim();
     const models = (process.env.AI_MODELS || defaultModel).split(',').map((item) => item.trim()).filter(Boolean).slice(0, 12);
     let validBase = false;
