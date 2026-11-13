@@ -2,9 +2,10 @@ import { ConsoleDefinition } from '../data/consoles';
 import { ControlProfile, createDefaultProfile } from './controls';
 
 const DB_NAME = 'RetroHubDB';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_SAVES = 'saveStates';
 const STORE_CONTROLS = 'controlProfiles';
+const STORE_ROMS = 'gameRoms';
 const LS_CONTROLS_PREFIX = 'retrohub_ctrl_';
 
 let currentUserScope = 'guest';
@@ -19,6 +20,17 @@ function scopedGameKey(gameId: string): string {
 
 function scopedProfileKey(rawProfileKey: string): string {
   return `${currentUserScope}::${rawProfileKey}`;
+}
+
+interface CachedGameRom {
+  id: string;
+  userId: string;
+  gameId: string;
+  fileName: string;
+  fileSize: number;
+  addedAt: number;
+  blob: Blob;
+  cachedAt: number;
 }
 
 export interface SaveStateRecord {
@@ -64,10 +76,113 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORE_CONTROLS)) {
         db.createObjectStore(STORE_CONTROLS, { keyPath: 'profileKey' });
       }
+      if (!db.objectStoreNames.contains(STORE_ROMS)) {
+        db.createObjectStore(STORE_ROMS, { keyPath: 'id' });
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error ?? new Error('Erro ao abrir IndexedDB.'));
   });
+}
+
+const MAX_CACHED_ROM_BYTES = 256 * 1024 * 1024;
+const MAX_TOTAL_ROM_CACHE_BYTES = 512 * 1024 * 1024;
+
+/** Read a previously downloaded game ROM from this account's local cache. */
+export async function getCachedGameRom(
+  gameId: string,
+  fileName: string,
+  fileSize: number,
+  addedAt: number
+): Promise<Blob | null> {
+  const db = await openDb();
+  const id = scopedGameKey(gameId);
+  try {
+    return await new Promise<Blob | null>((resolve, reject) => {
+      const tx = db.transaction(STORE_ROMS, 'readwrite');
+      const store = tx.objectStore(STORE_ROMS);
+      const request = store.get(id);
+      let cached: Blob | null = null;
+
+      request.onsuccess = () => {
+        const record = request.result as CachedGameRom | undefined;
+        if (
+          record &&
+          record.userId === currentUserScope &&
+          record.gameId === gameId &&
+          record.fileName === fileName &&
+          record.fileSize === fileSize &&
+          record.addedAt === addedAt &&
+          record.blob instanceof Blob &&
+          record.blob.size === fileSize
+        ) {
+          cached = record.blob;
+          record.cachedAt = Date.now();
+          store.put(record);
+        } else if (record) {
+          store.delete(id);
+        }
+      };
+      request.onerror = () => reject(request.error ?? new Error('Erro ao ler a ROM em cache.'));
+      tx.oncomplete = () => resolve(cached);
+      tx.onerror = () => reject(tx.error ?? new Error('Erro ao ler a ROM em cache.'));
+      tx.onabort = () => reject(tx.error ?? new Error('Leitura da cache cancelada.'));
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/** Persist a ROM locally so later launches do not have to download it again. */
+export async function cacheGameRom(
+  gameId: string,
+  fileName: string,
+  fileSize: number,
+  addedAt: number,
+  blob: Blob
+): Promise<void> {
+  if (!blob.size || blob.size > MAX_CACHED_ROM_BYTES || blob.size !== fileSize) return;
+
+  const db = await openDb();
+  const id = scopedGameKey(gameId);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_ROMS, 'readwrite');
+      const store = tx.objectStore(STORE_ROMS);
+      const request = store.getAll();
+
+      request.onsuccess = () => {
+        const records = (request.result as CachedGameRom[]).filter((item) => item.id !== id);
+        let totalBytes = blob.size + records.reduce((sum, item) => sum + (item.fileSize || 0), 0);
+
+        // Keep the most recently used files and cap the cache to avoid filling phone storage.
+        records.sort((a, b) => a.cachedAt - b.cachedAt);
+        while (totalBytes > MAX_TOTAL_ROM_CACHE_BYTES && records.length > 0) {
+          const oldest = records.shift()!;
+          store.delete(oldest.id);
+          totalBytes -= oldest.fileSize || 0;
+        }
+
+        const record: CachedGameRom = {
+          id,
+          userId: currentUserScope,
+          gameId,
+          fileName,
+          fileSize,
+          addedAt,
+          blob,
+          cachedAt: Date.now(),
+        };
+        store.put(record);
+      };
+      request.onerror = () => reject(request.error ?? new Error('Erro ao preparar a cache da ROM.'));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error('Erro ao guardar a ROM em cache.'));
+      tx.onabort = () => reject(tx.error ?? new Error('Cache da ROM cancelada.'));
+    });
+  } finally {
+    db.close();
+  }
 }
 
 export async function saveGameStateSlot(
