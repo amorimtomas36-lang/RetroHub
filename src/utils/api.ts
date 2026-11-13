@@ -357,3 +357,24 @@ export async function migrateLocalGamesToTeraBox(): Promise<{ migratedCount: num
   }
   return { migratedCount: Number(data.migratedCount || 0) };
 }
+
+
+export interface StorageStatus {
+  configured: boolean;
+  database: string;
+  files: string;
+  bucket: string | null;
+}
+
+export async function fetchStorageStatus(): Promise<StorageStatus> {
+  const res = await fetch('/api/storage/status', {
+    credentials: 'include',
+    headers: authHeaders(),
+  });
+  notifyIfUnauthorized(res);
+  const data = await readJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(typeof data.error === 'string' ? data.error : 'Não foi possível verificar a nuvem.');
+  }
+  return data as unknown as StorageStatus;
+}
