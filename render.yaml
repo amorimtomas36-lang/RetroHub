@@ -23,3 +23,13 @@ services:
         value: eu-central-1
       - key: RETROHUB_S3_BUCKET
         value: retrohub-roms
+      - key: AI_PROVIDER
+        value: OpenRouter
+      - key: AI_API_KEY
+        sync: false
+      - key: AI_API_BASE_URL
+        value: https://openrouter.ai/api/v1
+      - key: AI_DEFAULT_MODEL
+        value: openrouter/auto
+      - key: AI_MODELS
+        value: openrouter/auto
