@@ -4,7 +4,7 @@ import path from 'node:path';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import { Pool } from 'pg';
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 
 interface UserRecord {
   id: string;
@@ -80,6 +80,7 @@ databasePool?.on('error', (error: Error) => {
 });
 const NEON_STORAGE_BUCKET = (process.env.RETROHUB_S3_BUCKET || 'retrohub-roms').trim();
 let neonObjectClient: S3Client | null = null;
+let neonStorageValidated = false;
 const MAX_NEON_STORAGE_BYTES = 4.5 * 1024 * 1024 * 1024;
 
 const MAX_GAMES_PER_USER = 100;
@@ -715,8 +716,15 @@ async function teraboxDeleteFileBestEffort(userId: string, remotePath?: string):
 async function startServer() {
   ensureStorage();
   await initializeDatabasePersistence();
-  if (process.env.NODE_ENV === 'production' && !getNeonObjectStorageClient()) {
-    throw new Error('Neon Object Storage credentials are required in production.');
+  if (process.env.NODE_ENV === 'production') {
+    const objectStore = getNeonObjectStorageClient();
+    if (!objectStore) {
+      throw new Error('Neon Object Storage credentials are required in production.');
+    }
+    await objectStore.send(
+      new ListObjectsV2Command({ Bucket: NEON_STORAGE_BUCKET, MaxKeys: 1 })
+    );
+    neonStorageValidated = true;
   }
 
   const app = express();
@@ -1178,7 +1186,7 @@ async function startServer() {
     const databaseConfigured = Boolean(databasePool);
     const objectStorageConfigured = Boolean(getNeonObjectStorageClient());
     res.json({
-      configured: databaseConfigured && objectStorageConfigured,
+      configured: databaseConfigured && objectStorageConfigured && (process.env.NODE_ENV !== 'production' || neonStorageValidated),
       database: databaseConfigured ? 'Neon Postgres' : 'not-configured',
       files: objectStorageConfigured ? 'Neon Object Storage' : 'not-configured',
       bucket: objectStorageConfigured ? NEON_STORAGE_BUCKET : null,
@@ -1190,7 +1198,8 @@ async function startServer() {
     const all = readJson<LibraryGameRecord[]>(LIBRARY_FILE, []);
     const mine = all
       .filter((item) => item.userId === req.user!.id)
-      .sort((a, b) => b.lastPlayedAt - a.lastPlayedAt);
+      .sort((a, b) => b.lastPlayedAt - a.lastPlayedAt)
+      .map(({ storageKey: _storageKey, ...item }) => item);
     res.json({ games: mine });
   });
 
