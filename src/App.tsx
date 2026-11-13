@@ -43,7 +43,7 @@ import {
   logoutAccount,
   saveGameToLibrary,
 } from './utils/api';
-import { setIndexedDbUserScope } from './utils/indexedDb';
+import { cacheGameRom, setIndexedDbUserScope } from './utils/indexedDb';
 import { formatBytes } from './utils/romDetector';
 
 type AppRoute =
@@ -228,6 +228,13 @@ export default function App() {
         consoleName: consoleDef.name,
       })
         .then((savedGame) => {
+          void cacheGameRom(
+            savedGame.gameId,
+            savedGame.fileName,
+            savedGame.fileSize,
+            savedGame.addedAt,
+            file
+          ).catch(() => {});
           refreshLibrary();
           showLibraryNotice(
             'ok',
