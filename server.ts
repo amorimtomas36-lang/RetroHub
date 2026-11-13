@@ -715,6 +715,9 @@ async function teraboxDeleteFileBestEffort(userId: string, remotePath?: string):
 async function startServer() {
   ensureStorage();
   await initializeDatabasePersistence();
+  if (process.env.NODE_ENV === 'production' && !getNeonObjectStorageClient()) {
+    throw new Error('Neon Object Storage credentials are required in production.');
+  }
 
   const app = express();
   app.disable('x-powered-by');
@@ -1167,6 +1170,10 @@ async function startServer() {
     res.json({ migratedCount });
   });
 
+  app.get('/api/health', (_req: Request, res: Response) => {
+    res.status(200).json({ ok: true, service: 'RetroHub' });
+  });
+
   app.get('/api/storage/status', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
     const databaseConfigured = Boolean(databasePool);
     const objectStorageConfigured = Boolean(getNeonObjectStorageClient());
@@ -1208,6 +1215,15 @@ async function startServer() {
 
       const objectStore = getNeonObjectStorageClient();
       if (objectStore) {
+        const currentStoredBytes = await withDataLock(() =>
+          readJson<LibraryGameRecord[]>(LIBRARY_FILE, [])
+            .filter((item) => item.storageProvider === 'neon' && !(item.userId === req.user!.id && item.gameId === gameId))
+            .reduce((sum, item) => sum + item.fileSize, 0)
+        );
+        if (currentStoredBytes + req.body.length > MAX_NEON_STORAGE_BYTES) {
+          res.status(413).json({ error: 'O limite de armazenamento configurado para a nuvem RetroHub foi atingido. Remove ficheiros antigos para libertar espaço.' });
+          return;
+        }
         const storageKey = buildNeonStorageKey(req.user!.id, gameId, fileName);
         try {
           await objectStore.send(
