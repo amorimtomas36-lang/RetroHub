@@ -165,13 +165,6 @@ async function initializeDatabasePersistence() {
   }
 
   await databasePool.query('SELECT 1');
-  await databasePool.query(`
-    CREATE TABLE IF NOT EXISTS public.retrohub_state (
-      state_key TEXT PRIMARY KEY,
-      data JSONB NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
   for (const [filePath, stateKey] of DATA_FILE_KEYS.entries()) {
     const result = await databasePool.query<{ data: unknown }>(
       'SELECT data FROM public.retrohub_state WHERE state_key = $1',
@@ -1222,15 +1215,6 @@ async function startServer() {
 
       const objectStore = getNeonObjectStorageClient();
       if (objectStore) {
-        const currentStoredBytes = await withDataLock(() =>
-          readJson<LibraryGameRecord[]>(LIBRARY_FILE, [])
-            .filter((item) => item.storageProvider === 'neon' && !(item.userId === req.user!.id && item.gameId === gameId))
-            .reduce((sum, item) => sum + item.fileSize, 0)
-        );
-        if (currentStoredBytes + req.body.length > MAX_NEON_STORAGE_BYTES) {
-          res.status(413).json({ error: 'O limite de armazenamento configurado para a nuvem RetroHub foi atingido. Remove ficheiros antigos para libertar espaço.' });
-          return;
-        }
         const storageKey = buildNeonStorageKey(req.user!.id, gameId, fileName);
         try {
           await objectStore.send(
@@ -1247,10 +1231,23 @@ async function startServer() {
             const existingIdx = all.findIndex(
               (g) => g.userId === req.user!.id && g.gameId === gameId
             );
-            const previousStorageKey =
-              existingIdx >= 0 && all[existingIdx].storageProvider === 'neon'
-                ? all[existingIdx].storageKey
-                : undefined;
+            const previousRecord = existingIdx >= 0 ? all[existingIdx] : undefined;
+            const userGames = all.filter((item) => item.userId === req.user!.id);
+            const currentStoredBytes = all
+              .filter(
+                (item) =>
+                  item.storageProvider === 'neon' &&
+                  !(item.userId === req.user!.id && item.gameId === gameId)
+              )
+              .reduce((sum, item) => sum + item.fileSize, 0);
+
+            if (existingIdx < 0 && userGames.length >= MAX_GAMES_PER_USER) {
+              return { error: `Limite de ${MAX_GAMES_PER_USER} jogos por conta atingido.` };
+            }
+            if (currentStoredBytes + req.body.length > MAX_NEON_STORAGE_BYTES) {
+              return { error: 'O limite de armazenamento gratuito da nuvem RetroHub foi atingido. Remove ficheiros antigos para libertar espaço.' };
+            }
+
             const now = Date.now();
             const record: LibraryGameRecord = {
               id: existingIdx >= 0 ? all[existingIdx].id : crypto.randomUUID(),
@@ -1269,11 +1266,19 @@ async function startServer() {
             if (existingIdx >= 0) all[existingIdx] = record;
             else all.push(record);
             await writeJsonAtomic(LIBRARY_FILE, all);
-            return { record, previousStorageKey };
+            return { record, previousRecord };
           });
 
-          if (saved.previousStorageKey && saved.previousStorageKey !== storageKey) {
-            await deleteNeonStoredObject(saved.previousStorageKey);
+          if ('error' in saved) {
+            await deleteNeonStoredObject(storageKey);
+            res.status(413).json({ error: saved.error });
+            return;
+          }
+
+          if (saved.previousRecord?.storageProvider === 'neon' && saved.previousRecord.storageKey) {
+            await deleteNeonStoredObject(saved.previousRecord.storageKey);
+          } else if (saved.previousRecord?.storageProvider === 'terabox') {
+            await teraboxDeleteFileBestEffort(req.user!.id, saved.previousRecord.teraboxPath);
           }
           try {
             const { romPath } = resolveUserRomPath(req.user!.id, gameId);
@@ -1317,7 +1322,7 @@ async function startServer() {
           return { error: `Limite de ${MAX_GAMES_PER_USER} jogos salvos na conta atingido.` };
         }
         if (currentTotalBytes + req.body.length > MAX_STORAGE_BYTES_PER_USER) {
-          return { error: 'Limite de armazenamento local (500 MB) excedido. Conecte o TeraBox para 1 TB grátis.' };
+          return { error: 'Limite de armazenamento local de desenvolvimento (500 MB) excedido.' };
         }
 
         const { userDir, romPath } = resolveUserRomPath(req.user!.id, gameId);
