@@ -1,3 +1,5 @@
+import { cacheGameRom, getCachedGameRom } from './indexedDb';
+
 export interface AuthUser {
   id: string;
   username: string;
@@ -15,7 +17,7 @@ export interface LibraryGameItem {
   fileSize: number;
   addedAt: number;
   lastPlayedAt: number;
-  storageProvider?: 'local' | 'terabox';
+  storageProvider?: 'local' | 'terabox' | 'neon';
   teraboxPath?: string;
 }
 
@@ -247,6 +249,21 @@ export async function saveGameToLibrary(params: {
 }
 
 export async function downloadSavedLibraryRom(item: LibraryGameItem): Promise<File> {
+  // Reuse a local copy first. This avoids another cloud download on repeat launches.
+  try {
+    const cached = await getCachedGameRom(
+      item.gameId,
+      item.fileName,
+      item.fileSize,
+      item.addedAt
+    );
+    if (cached) {
+      return new File([cached], item.fileName, { type: 'application/octet-stream' });
+    }
+  } catch {
+    // Private mode, storage quota, or IndexedDB errors should fall back to the cloud.
+  }
+
   const res = await fetch(`/api/library/${encodeURIComponent(item.gameId)}/rom`, {
     credentials: 'include',
     headers: authHeaders(),
@@ -256,6 +273,9 @@ export async function downloadSavedLibraryRom(item: LibraryGameItem): Promise<Fi
     throw new Error('Não foi possível abrir o arquivo salvo.');
   }
   const blob = await res.blob();
+
+  // Save in the background so the first launch is not delayed by local storage writes.
+  void cacheGameRom(item.gameId, item.fileName, item.fileSize, item.addedAt, blob).catch(() => {});
   return new File([blob], item.fileName, { type: 'application/octet-stream' });
 }
 
@@ -356,4 +376,25 @@ export async function migrateLocalGamesToTeraBox(): Promise<{ migratedCount: num
     );
   }
   return { migratedCount: Number(data.migratedCount || 0) };
+}
+
+
+export interface StorageStatus {
+  configured: boolean;
+  database: string;
+  files: string;
+  bucket: string | null;
+}
+
+export async function fetchStorageStatus(): Promise<StorageStatus> {
+  const res = await fetch('/api/storage/status', {
+    credentials: 'include',
+    headers: authHeaders(),
+  });
+  notifyIfUnauthorized(res);
+  const data = await readJsonSafe(res);
+  if (!res.ok) {
+    throw new Error(typeof data.error === 'string' ? data.error : 'Não foi possível verificar a nuvem.');
+  }
+  return data as unknown as StorageStatus;
 }

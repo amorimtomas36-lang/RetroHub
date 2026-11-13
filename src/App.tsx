@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Cloud,
+  BrainCircuit,
   FileUp,
   FolderOpen,
   Gamepad2,
+  Gauge,
   HardDrive,
   LogOut,
   Menu,
@@ -22,25 +24,26 @@ import {
   getConsoleBySlug,
 } from './data/consoles';
 import { AuthPage } from './components/AuthPage';
+import { AIHubView } from './components/AIHubView';
+import { GameOptimizerView } from './components/GameOptimizerView';
 import { ConsolePage } from './components/ConsolePage';
 import { ControlsConfigView } from './components/ControlsConfigView';
 import { ActiveRomSession, EmulatorPlayer } from './components/EmulatorPlayer';
 import { LibraryView } from './components/LibraryView';
 import { RomLoaderView } from './components/RomLoaderView';
 import { SaveManagerView } from './components/SaveManagerView';
-import { TeraBoxConnectModal } from './components/TeraBoxConnectModal';
 import {
   AuthUser,
   LibraryGameItem,
-  TeraBoxStatus,
+  StorageStatus,
   downloadSavedLibraryRom,
   fetchCurrentUser,
   fetchSavedLibrary,
-  fetchTeraBoxStatus,
+  fetchStorageStatus,
   logoutAccount,
   saveGameToLibrary,
 } from './utils/api';
-import { setIndexedDbUserScope } from './utils/indexedDb';
+import { cacheGameRom, setIndexedDbUserScope } from './utils/indexedDb';
 import { formatBytes } from './utils/romDetector';
 
 type AppRoute =
@@ -49,6 +52,8 @@ type AppRoute =
   | { view: 'loader' }
   | { view: 'controls'; consoleId?: string }
   | { view: 'saves' }
+  | { view: 'ai' }
+  | { view: 'optimizer' }
   | { view: 'console'; slug: string }
   | { view: 'play'; slug: string };
 
@@ -59,6 +64,8 @@ function parsePathToRoute(pathname: string): AppRoute {
   if (clean === '/carregar-jogo') return { view: 'loader' };
   if (clean === '/controles') return { view: 'controls' };
   if (clean === '/saves') return { view: 'saves' };
+  if (clean === '/ia') return { view: 'ai' };
+  if (clean === '/otimizar') return { view: 'optimizer' };
   if (clean.startsWith('/console/')) {
     const slug = clean.slice('/console/'.length);
     if (getConsoleBySlug(slug)) return { view: 'console', slug };
@@ -83,8 +90,7 @@ export default function App() {
 
   const [libraryGames, setLibraryGames] = useState<LibraryGameItem[]>([]);
   const [libraryLoading, setLibraryLoading] = useState(false);
-  const [teraboxStatus, setTeraboxStatus] = useState<TeraBoxStatus | null>(null);
-  const [teraboxModalOpen, setTeraboxModalOpen] = useState(false);
+  const [storageStatus, setStorageStatus] = useState<StorageStatus | null>(null);
   const [openingSavedId, setOpeningSavedId] = useState<string | null>(null);
   const [libraryNotice, setLibraryNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(
     null
@@ -121,12 +127,12 @@ export default function App() {
     }
   }, []);
 
-  const refreshTeraBox = useCallback(async () => {
+  const refreshStorage = useCallback(async () => {
     try {
-      const status = await fetchTeraBoxStatus();
-      setTeraboxStatus(status);
+      const status = await fetchStorageStatus();
+      setStorageStatus(status);
     } catch {
-      setTeraboxStatus(null);
+      setStorageStatus(null);
     }
   }, []);
 
@@ -161,14 +167,14 @@ export default function App() {
     if (user) {
       setIndexedDbUserScope(user.id);
       refreshLibrary();
-      refreshTeraBox();
+      refreshStorage();
     } else {
       setIndexedDbUserScope(null);
       setLibraryGames([]);
-      setTeraboxStatus(null);
+      setStorageStatus(null);
       setActiveSession(null);
     }
-  }, [user, refreshLibrary, refreshTeraBox]);
+  }, [user, refreshLibrary, refreshStorage]);
 
   const navigate = (path: string, nextRoute?: AppRoute) => {
     if (typeof window !== 'undefined' && window.location.pathname !== path) {
@@ -186,7 +192,7 @@ export default function App() {
     const onUnauthorized = () => {
       setIndexedDbUserScope(null);
       setUser(null);
-      setTeraboxStatus(null);
+      setStorageStatus(null);
       setActiveSession(null);
     };
     window.addEventListener('popstate', onPopState);
@@ -222,12 +228,21 @@ export default function App() {
         consoleName: consoleDef.name,
       })
         .then((savedGame) => {
+          void cacheGameRom(
+            savedGame.gameId,
+            savedGame.fileName,
+            savedGame.fileSize,
+            savedGame.addedAt,
+            file
+          ).catch(() => {});
           refreshLibrary();
           showLibraryNotice(
             'ok',
-            savedGame.storageProvider === 'terabox'
-              ? `"${cleanTitle}" foi salvo automaticamente no seu TeraBox.`
-              : `"${cleanTitle}" foi salvo na sua conta.`,
+            savedGame.storageProvider === 'neon'
+              ? `"${cleanTitle}" foi guardado na nuvem RetroHub.`
+              : savedGame.storageProvider === 'terabox'
+                ? `"${cleanTitle}" continua guardado na sua nuvem TeraBox.`
+                : `"${cleanTitle}" foi salvo na sua conta.`,
             3500
           );
         })
@@ -311,6 +326,8 @@ export default function App() {
     route.view === 'console' || route.view === 'play' ? route.slug : null;
 
   const renderMainContent = () => {
+    if (route.view === 'ai') return <AIHubView username={user.username} />;
+    if (route.view === 'optimizer') return <GameOptimizerView games={libraryGames} />;
     if (route.view === 'play') {
       if (activeSession) {
         return (
@@ -347,13 +364,11 @@ export default function App() {
         <LibraryView
           games={libraryGames}
           loading={libraryLoading}
-          teraboxStatus={teraboxStatus}
+          storageStatus={storageStatus}
           onPlaySavedGame={(file, consoleDef, gameId) =>
             handleLaunchRom(file, consoleDef, gameId, true)
           }
           onRefreshLibrary={refreshLibrary}
-          onRefreshTeraBox={refreshTeraBox}
-          onOpenTeraBoxModal={() => setTeraboxModalOpen(true)}
           onGoToUpload={() => navigate('/carregar-jogo', { view: 'loader' })}
         />
       );
@@ -443,25 +458,35 @@ export default function App() {
               </button>
               <button
                 type="button"
+                onClick={() => navigate('/ia', { view: 'ai' })}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg border border-violet-400/30 bg-violet-500/10 text-violet-200 hover:bg-violet-500/20 text-sm font-medium transition-colors whitespace-nowrap"
+              >
+                <BrainCircuit className="w-4 h-4" />
+                Centro Multi-IA
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/otimizar', { view: 'optimizer' })}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg border border-emerald-400/30 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20 text-sm font-medium transition-colors whitespace-nowrap"
+              >
+                <Gauge className="w-4 h-4" />
+                Otimizar Jogos
+              </button>
+              <button
+                type="button"
                 onClick={() => navigate('/controles', { view: 'controls' })}
                 className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg border border-white/15 text-slate-200 hover:text-white hover:bg-white/5 text-sm font-medium transition-colors whitespace-nowrap"
               >
                 <Settings className="w-4 h-4" />
                 Configurar Controles
               </button>
-              <button
+                            <button
                 type="button"
-                onClick={() => setTeraboxModalOpen(true)}
-                className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-lg border text-sm font-medium transition-colors whitespace-nowrap ${
-                  teraboxStatus?.connected
-                    ? 'border-sky-500/40 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20'
-                    : 'border-white/15 text-slate-200 hover:text-white hover:bg-white/5'
-                }`}
+                onClick={() => navigate('/biblioteca', { view: 'library' })}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg border border-sky-500/40 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20 text-sm font-medium transition-colors whitespace-nowrap"
               >
                 <Cloud className="w-4 h-4" />
-                {teraboxStatus?.connected
-                  ? `TeraBox: ${teraboxStatus.account?.uname || 'Conectado'}`
-                  : 'Conectar TeraBox (1 TB Grátis)'}
+                {storageStatus?.configured ? 'Nuvem RetroHub ativa' : 'Ver armazenamento na nuvem'}
               </button>
             </div>
           </div>
@@ -478,6 +503,13 @@ export default function App() {
                 Jogos adicionados por você ficam salvos para abrir rapidamente sem reenviar o arquivo.
               </p>
             </div>
+            <button
+              type="button"
+              onClick={() => navigate('/ia', { view: 'ai' })}
+              className="px-2.5 py-2 rounded-lg bg-violet-500/15 text-violet-200 text-left font-medium"
+            >
+              Centro IA
+            </button>
             <button
               type="button"
               onClick={() => navigate('/biblioteca', { view: 'library' })}
@@ -655,6 +687,20 @@ export default function App() {
             Consoles
           </a>
           <a
+            href="/ia"
+            onClick={(e) => { e.preventDefault(); navigate('/ia', { view: 'ai' }); }}
+            className="hover:text-white transition-colors whitespace-nowrap shrink-0"
+          >
+            Centro IA
+          </a>
+          <a
+            href="/otimizar"
+            onClick={(e) => { e.preventDefault(); navigate('/otimizar', { view: 'optimizer' }); }}
+            className={`hover:text-white transition-colors whitespace-nowrap shrink-0 ${route.view === 'optimizer' ? 'text-white underline underline-offset-8 decoration-emerald-400' : ''}`}
+          >
+            Otimizar Jogos
+          </a>
+          <a
             href="/biblioteca"
             onClick={(e) => {
               e.preventDefault();
@@ -763,29 +809,17 @@ export default function App() {
               </button>
             </div>
 
-            <button
+                        <button
               type="button"
-              onClick={() => setTeraboxModalOpen(true)}
-              className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border text-[11px] font-medium transition-colors ${
-                teraboxStatus?.connected
-                  ? 'border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20'
-                  : 'border-white/10 bg-[#0B0D12] text-slate-300 hover:text-white hover:border-sky-500/40'
-              }`}
+              onClick={() => navigate('/biblioteca', { view: 'library' })}
+              className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20 text-[11px] font-medium transition-colors"
             >
               <span className="inline-flex items-center gap-1.5 min-w-0 truncate">
                 <Cloud className="w-3.5 h-3.5 shrink-0 text-sky-400" />
-                <span className="truncate">
-                  {teraboxStatus?.connected
-                    ? `TeraBox: ${teraboxStatus.account?.uname || 'Conectado'}`
-                    : 'Conectar TeraBox (Nuvem)'}
-                </span>
+                <span className="truncate">Armazenamento RetroHub</span>
               </span>
-              <span
-                className={`text-[10px] shrink-0 ${
-                  teraboxStatus?.connected ? 'text-emerald-400' : 'text-sky-400'
-                }`}
-              >
-                {teraboxStatus?.connected ? 'Ativo' : '1 TB'}
+              <span className="text-[10px] shrink-0">
+                {storageStatus?.configured ? 'Ativo' : 'A verificar'}
               </span>
             </button>
           </div>
@@ -805,6 +839,13 @@ export default function App() {
               className="px-2.5 py-2 rounded-lg bg-white/5 text-slate-200 text-left font-medium"
             >
               Carregar Jogo
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/otimizar', { view: 'optimizer' })}
+              className="px-2.5 py-2 rounded-lg bg-emerald-500/10 text-emerald-200 text-left font-medium"
+            >
+              Otimizar Jogos
             </button>
             <button
               type="button"
@@ -932,19 +973,7 @@ export default function App() {
         </main>
       </div>
 
-      <TeraBoxConnectModal
-        open={teraboxModalOpen}
-        status={teraboxStatus}
-        onClose={() => setTeraboxModalOpen(false)}
-        onConnected={async () => {
-          await Promise.all([refreshTeraBox(), refreshLibrary()]);
-          showLibraryNotice(
-            'ok',
-            'TeraBox conectado! Todos os jogos enviados agora serão salvos na sua nuvem TeraBox.',
-            4500
-          );
-        }}
-      />
+
     </div>
   );
 }

@@ -37,6 +37,7 @@ import {
 import { formatBytes } from '../utils/romDetector';
 import { ExitSaveModal } from './ExitSaveModal';
 import { TouchControlsOverlay } from './TouchControlsOverlay';
+import { loadGameOptimizationProfile } from '../utils/gameOptimizer';
 
 export interface ActiveRomSession {
   file: File;
@@ -183,6 +184,18 @@ export const EmulatorPlayer: React.FC<EmulatorPlayerProps> = ({
     setProfile(loadControlProfileSync(consoleDef, gameId, gameName));
     refreshSlots();
   }, [consoleDef, gameId, gameName, refreshSlots]);
+
+  const optimizationProfile = useMemo(
+    () => loadGameOptimizationProfile(consoleDef.id, gameId),
+    [consoleDef.id, gameId]
+  );
+  const useOptimizedThreads = Boolean(
+    optimizationProfile?.threads &&
+    typeof window !== 'undefined' &&
+    window.crossOriginIsolated === true &&
+    typeof SharedArrayBuffer !== 'undefined'
+  );
+  const useLegacyGraphicsCore = Boolean(optimizationProfile?.forceLegacyCores);
 
   // Build srcdoc for isolated EmulatorJS iframe (same-origin access for state & input)
   const iframeSrcDoc = useMemo(() => {
@@ -369,7 +382,14 @@ export const EmulatorPlayer: React.FC<EmulatorPlayerProps> = ({
     window.EJS_gameUrl = ${JSON.stringify(romBlobUrl)};
     window.EJS_biosUrl = '';
     window.EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
-    window.EJS_threads = false;
+    // Keep downloaded WebAssembly cores and ROM assets in IndexedDB for faster repeat launches.
+    window.EJS_cacheConfig = {
+      enabled: true,
+      cacheMaxSizeMB: 512,
+      cacheMaxAgeMins: 43200
+    };
+    window.EJS_threads = ${useOptimizedThreads ? 'true' : 'false'};
+    window.EJS_forceLegacyCores = ${useLegacyGraphicsCore ? 'true' : 'false'};
     window.EJS_volume = 0.85;
     window.EJS_color = '#f97316';
     window.EJS_backgroundColor = '#0b0d12';
@@ -403,11 +423,12 @@ export const EmulatorPlayer: React.FC<EmulatorPlayerProps> = ({
   </script>
   <script
     src="https://cdn.emulatorjs.org/stable/data/loader.js"
+    fetchpriority="high"
     onerror="window.parent.postMessage({ type: 'retrohub-ejs-error', message: 'Não foi possível carregar o motor EmulatorJS (verifique a conexão com a internet).' }, '*')"
   ></script>
 </body>
 </html>`;
-  }, [romBlobUrl, consoleDef.ejsCore, gameId, gameName]);
+  }, [romBlobUrl, consoleDef.ejsCore, gameId, gameName, useOptimizedThreads, useLegacyGraphicsCore]);
 
   // Helper to unlock AudioContext inside the emulator iframe from parent interactions
   const resumeIframeAudio = useCallback(() => {
@@ -1098,6 +1119,7 @@ export const EmulatorPlayer: React.FC<EmulatorPlayerProps> = ({
             ref={iframeRef}
             title={`${gameName} — ${consoleDef.name}`}
             srcDoc={iframeSrcDoc}
+            loading="eager"
             allow="autoplay; gamepad; fullscreen"
             className={`w-full h-full border-0 ${editTouchLayout ? 'pointer-events-none' : ''}`}
           />

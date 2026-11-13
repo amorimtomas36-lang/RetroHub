@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: retrohub-cloud
+    runtime: node
+    plan: free
+    region: frankfurt
+    branch: feat/neon-cloud-storage
+    buildCommand: npm install --include=dev && npm run lint && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_ENDPOINT_URL_S3
+        value: https://br-wispy-butterfly-b9k895ae.storage.c-7.eu-central-1.aws.neon.tech
+      - key: AWS_REGION
+        value: eu-central-1
+      - key: RETROHUB_S3_BUCKET
+        value: retrohub-roms
+      - key: AI_PROVIDER
+        value: OpenRouter
+      - key: AI_API_KEY
+        sync: false
+      - key: AI_API_BASE_URL
+        value: https://openrouter.ai/api/v1
+      - key: AI_DEFAULT_MODEL
+        value: openrouter/auto
+      - key: AI_MODELS
+        value: openrouter/auto
