@@ -75,7 +75,7 @@ const DATABASE_URL = (process.env.DATABASE_URL || '').trim();
 const databasePool = DATABASE_URL
   ? new Pool({ connectionString: DATABASE_URL, max: 5, idleTimeoutMillis: 30000, connectionTimeoutMillis: 10000 })
   : null;
-databasePool?.on('error', (error) => {
+databasePool?.on('error', (error: Error) => {
   console.error('Unexpected database connection error:', error.message);
 });
 const NEON_STORAGE_BUCKET = (process.env.RETROHUB_S3_BUCKET || 'retrohub-roms').trim();
