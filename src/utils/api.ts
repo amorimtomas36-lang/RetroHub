@@ -15,7 +15,7 @@ export interface LibraryGameItem {
   fileSize: number;
   addedAt: number;
   lastPlayedAt: number;
-  storageProvider?: 'local' | 'terabox';
+  storageProvider?: 'local' | 'terabox' | 'neon';
   teraboxPath?: string;
 }
 
