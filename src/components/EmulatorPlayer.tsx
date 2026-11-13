@@ -37,6 +37,7 @@ import {
 import { formatBytes } from '../utils/romDetector';
 import { ExitSaveModal } from './ExitSaveModal';
 import { TouchControlsOverlay } from './TouchControlsOverlay';
+import { loadGameOptimizationProfile } from '../utils/gameOptimizer';
 
 export interface ActiveRomSession {
   file: File;
@@ -183,6 +184,18 @@ export const EmulatorPlayer: React.FC<EmulatorPlayerProps> = ({
     setProfile(loadControlProfileSync(consoleDef, gameId, gameName));
     refreshSlots();
   }, [consoleDef, gameId, gameName, refreshSlots]);
+
+  const optimizationProfile = useMemo(
+    () => loadGameOptimizationProfile(consoleDef.id, gameId),
+    [consoleDef.id, gameId]
+  );
+  const useOptimizedThreads = Boolean(
+    optimizationProfile?.threads &&
+    typeof window !== 'undefined' &&
+    window.crossOriginIsolated === true &&
+    typeof SharedArrayBuffer !== 'undefined'
+  );
+  const useLegacyGraphicsCore = Boolean(optimizationProfile?.forceLegacyCores);
 
   // Build srcdoc for isolated EmulatorJS iframe (same-origin access for state & input)
   const iframeSrcDoc = useMemo(() => {
@@ -369,7 +382,8 @@ export const EmulatorPlayer: React.FC<EmulatorPlayerProps> = ({
     window.EJS_gameUrl = ${JSON.stringify(romBlobUrl)};
     window.EJS_biosUrl = '';
     window.EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
-    window.EJS_threads = false;
+    window.EJS_threads = ${useOptimizedThreads ? 'true' : 'false'};
+    window.EJS_forceLegacyCores = ${useLegacyGraphicsCore ? 'true' : 'false'};
     window.EJS_volume = 0.85;
     window.EJS_color = '#f97316';
     window.EJS_backgroundColor = '#0b0d12';
@@ -407,7 +421,7 @@ export const EmulatorPlayer: React.FC<EmulatorPlayerProps> = ({
   ></script>
 </body>
 </html>`;
-  }, [romBlobUrl, consoleDef.ejsCore, gameId, gameName]);
+  }, [romBlobUrl, consoleDef.ejsCore, gameId, gameName, useOptimizedThreads, useLegacyGraphicsCore]);
 
   // Helper to unlock AudioContext inside the emulator iframe from parent interactions
   const resumeIframeAudio = useCallback(() => {
