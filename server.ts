@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
+import { Pool } from 'pg';
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 
 interface UserRecord {
   id: string;
@@ -30,9 +32,10 @@ interface LibraryGameRecord {
   fileSize: number;
   addedAt: number;
   lastPlayedAt: number;
-  storageProvider?: 'local' | 'terabox';
+  storageProvider?: 'local' | 'terabox' | 'neon';
   teraboxPath?: string;
   teraboxFsId?: string;
+  storageKey?: string;
 }
 
 interface TeraBoxAccountRecord {
@@ -62,14 +65,31 @@ const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const LIBRARY_FILE = path.join(DATA_DIR, 'library.json');
 const TERABOX_FILE = path.join(DATA_DIR, 'terabox.json');
 
+const DATA_FILE_KEYS = new Map<string, string>([
+  [path.resolve(USERS_FILE), 'users'],
+  [path.resolve(SESSIONS_FILE), 'sessions'],
+  [path.resolve(LIBRARY_FILE), 'library'],
+  [path.resolve(TERABOX_FILE), 'terabox'],
+]);
+const DATABASE_URL = (process.env.DATABASE_URL || '').trim();
+const databasePool = DATABASE_URL
+  ? new Pool({ connectionString: DATABASE_URL, max: 5, idleTimeoutMillis: 30000, connectionTimeoutMillis: 10000 })
+  : null;
+databasePool?.on('error', (error) => {
+  console.error('Unexpected database connection error:', error.message);
+});
+const NEON_STORAGE_BUCKET = (process.env.RETROHUB_S3_BUCKET || 'retrohub-roms').trim();
+let neonObjectClient: S3Client | null = null;
+const MAX_NEON_STORAGE_BYTES = 4.5 * 1024 * 1024 * 1024;
+
 const MAX_GAMES_PER_USER = 100;
-const MAX_STORAGE_BYTES_PER_USER = 500 * 1024 * 1024; // 500 MB local fallback per user
+const MAX_STORAGE_BYTES_PER_USER = 500 * 1024 * 1024; // development-only local fallback per user
 const TERABOX_CHUNK_BYTES = 4 * 1024 * 1024; // 4 MiB required by TeraBox superfile2
 
 // Simple in-memory mutex chain for serialized JSON file mutations
 let writeLock: Promise<void> = Promise.resolve();
-function withDataLock<T>(fn: () => T): Promise<T> {
-  const next = writeLock.then(() => fn());
+function withDataLock<T>(fn: () => T | Promise<T>): Promise<T> {
+  const next = writeLock.then(() => Promise.resolve(fn()));
   writeLock = next.then(
     () => undefined,
     () => undefined
@@ -115,11 +135,83 @@ function readJson<T>(filePath: string, fallback: T): T {
   }
 }
 
-function writeJsonAtomic(filePath: string, data: unknown) {
+function writeJsonFileAtomic(filePath: string, data: unknown) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const tmpPath = `${filePath}.${crypto.randomUUID()}.tmp`;
   fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
   fs.renameSync(tmpPath, filePath);
+}
+
+async function writeJsonAtomic(filePath: string, data: unknown) {
+  const stateKey = DATA_FILE_KEYS.get(path.resolve(filePath));
+  if (databasePool && stateKey) {
+    await databasePool.query(
+      `INSERT INTO public.retrohub_state (state_key, data, updated_at)
+       VALUES ($1, $2::jsonb, NOW())
+       ON CONFLICT (state_key)
+       DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+      [stateKey, JSON.stringify(data)]
+    );
+  }
+  writeJsonFileAtomic(filePath, data);
+}
+
+async function initializeDatabasePersistence() {
+  if (!databasePool) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('DATABASE_URL is required in production.');
+    }
+    return;
+  }
+
+  await databasePool.query('SELECT 1');
+  for (const [filePath, stateKey] of DATA_FILE_KEYS.entries()) {
+    const result = await databasePool.query<{ data: unknown }>(
+      'SELECT data FROM public.retrohub_state WHERE state_key = $1',
+      [stateKey]
+    );
+    if (result.rows.length > 0) {
+      writeJsonFileAtomic(filePath, result.rows[0].data);
+    } else {
+      const localData = readJson<unknown[]>(filePath, []);
+      await databasePool.query(
+        `INSERT INTO public.retrohub_state (state_key, data, updated_at)
+         VALUES ($1, $2::jsonb, NOW()) ON CONFLICT (state_key) DO NOTHING`,
+        [stateKey, JSON.stringify(localData)]
+      );
+    }
+  }
+}
+
+function getNeonObjectStorageClient(): S3Client | null {
+  const endpoint = (process.env.AWS_ENDPOINT_URL_S3 || '').trim();
+  const accessKeyId = (process.env.AWS_ACCESS_KEY_ID || '').trim();
+  const secretAccessKey = (process.env.AWS_SECRET_ACCESS_KEY || '').trim();
+  if (!endpoint || !accessKeyId || !secretAccessKey) return null;
+  if (!neonObjectClient) {
+    neonObjectClient = new S3Client({
+      region: process.env.AWS_REGION || 'eu-central-1',
+      endpoint,
+      forcePathStyle: true,
+      credentials: { accessKeyId, secretAccessKey },
+    });
+  }
+  return neonObjectClient;
+}
+
+function buildNeonStorageKey(userId: string, gameId: string, fileName: string): string {
+  const safeName = sanitizeTeraBoxFileName(fileName);
+  return `users/${sanitizeId(userId)}/${sanitizeId(gameId)}/${crypto.randomUUID()}_${safeName}`;
+}
+
+async function deleteNeonStoredObject(storageKey?: string) {
+  const client = getNeonObjectStorageClient();
+  if (!client || !storageKey) return;
+  try {
+    await client.send(new DeleteObjectCommand({ Bucket: NEON_STORAGE_BUCKET, Key: storageKey }));
+  } catch {
+    // Ignore remote deletion errors after metadata is removed.
+  }
 }
 
 function hashToken(token: string): string {
@@ -337,12 +429,12 @@ async function saveTeraBoxConnectionForUser(
     avatarUrl: profile.avatarUrl,
     connectedAt: now,
   };
-  await withDataLock(() => {
+  await withDataLock(async () => {
     const all = readJson<TeraBoxAccountRecord[]>(TERABOX_FILE, []).filter(
       (item) => item.userId !== userId
     );
     all.push(record);
-    writeJsonAtomic(TERABOX_FILE, all);
+    await writeJsonAtomic(TERABOX_FILE, all);
   });
   return record;
 }
@@ -406,11 +498,11 @@ async function ensureValidTeraBoxRecord(userId: string): Promise<TeraBoxAccountR
         uploadDomain: info.uploadDomain,
         domainCachedAt: now,
       };
-      await withDataLock(() => {
+      await withDataLock(async () => {
         const all = readJson<TeraBoxAccountRecord[]>(TERABOX_FILE, []).map((item) =>
           item.userId === userId ? rec! : item
         );
-        writeJsonAtomic(TERABOX_FILE, all);
+        await writeJsonAtomic(TERABOX_FILE, all);
       });
     }
 
@@ -622,6 +714,7 @@ async function teraboxDeleteFileBestEffort(userId: string, remotePath?: string):
 
 async function startServer() {
   ensureStorage();
+  await initializeDatabasePersistence();
 
   const app = express();
   app.disable('x-powered-by');
@@ -706,7 +799,7 @@ async function startServer() {
       return;
     }
 
-    const result = await withDataLock(() => {
+    const result = await withDataLock(async () => {
       const users = readJson<UserRecord[]>(USERS_FILE, []);
       const usernameLower = username.toLocaleLowerCase('pt-BR');
       if (users.some((u) => u.usernameLower === usernameLower)) {
@@ -721,7 +814,7 @@ async function startServer() {
         createdAt: Date.now(),
       };
       users.push(newUser);
-      writeJsonAtomic(USERS_FILE, users);
+      await writeJsonAtomic(USERS_FILE, users);
 
       const token = crypto.randomBytes(32).toString('hex');
       const sessions = readJson<SessionRecord[]>(SESSIONS_FILE, []).filter(
@@ -733,7 +826,7 @@ async function startServer() {
         createdAt: Date.now(),
         expiresAt: Date.now() + 1000 * 60 * 60 * 24 * 30,
       });
-      writeJsonAtomic(SESSIONS_FILE, sessions);
+      await writeJsonAtomic(SESSIONS_FILE, sessions);
 
       return { conflict: false as const, newUser, token };
     });
@@ -773,7 +866,7 @@ async function startServer() {
     }
 
     const token = crypto.randomBytes(32).toString('hex');
-    await withDataLock(() => {
+    await withDataLock(async () => {
       const sessions = readJson<SessionRecord[]>(SESSIONS_FILE, []).filter(
         (s) => typeof s.tokenHash === 'string' && s.tokenHash.length === 64 && s.expiresAt > Date.now()
       );
@@ -783,7 +876,7 @@ async function startServer() {
         createdAt: Date.now(),
         expiresAt: Date.now() + 1000 * 60 * 60 * 24 * 30,
       });
-      writeJsonAtomic(SESSIONS_FILE, sessions);
+      await writeJsonAtomic(SESSIONS_FILE, sessions);
     });
 
     res.setHeader('Set-Cookie', buildCookieHeader(req, token, 60 * 60 * 24 * 30));
@@ -807,11 +900,11 @@ async function startServer() {
     const token = extractToken(req);
     if (token) {
       const tHash = hashToken(token);
-      await withDataLock(() => {
+      await withDataLock(async () => {
         const sessions = readJson<SessionRecord[]>(SESSIONS_FILE, []).filter(
           (s) => s.tokenHash !== tHash
         );
-        writeJsonAtomic(SESSIONS_FILE, sessions);
+        await writeJsonAtomic(SESSIONS_FILE, sessions);
       });
     }
     res.setHeader('Set-Cookie', buildCookieHeader(req, '', 0));
@@ -1009,11 +1102,11 @@ async function startServer() {
   });
 
   app.post('/api/terabox/disconnect', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-    await withDataLock(() => {
+    await withDataLock(async () => {
       const all = readJson<TeraBoxAccountRecord[]>(TERABOX_FILE, []).filter(
         (item) => item.userId !== req.user!.id
       );
-      writeJsonAtomic(TERABOX_FILE, all);
+      await writeJsonAtomic(TERABOX_FILE, all);
     });
     res.json({ ok: true });
   });
@@ -1045,7 +1138,7 @@ async function startServer() {
           game.fileName,
           buf
         );
-        await withDataLock(() => {
+        await withDataLock(async () => {
           const current = readJson<LibraryGameRecord[]>(LIBRARY_FILE, []);
           const idx = current.findIndex(
             (x) => x.userId === req.user!.id && x.gameId === game.gameId
@@ -1057,7 +1150,7 @@ async function startServer() {
               teraboxPath: uploaded.remotePath,
               teraboxFsId: uploaded.fsId,
             };
-            writeJsonAtomic(LIBRARY_FILE, current);
+            await writeJsonAtomic(LIBRARY_FILE, current);
           }
         });
         try {
@@ -1074,7 +1167,18 @@ async function startServer() {
     res.json({ migratedCount });
   });
 
-  // Cloud Game Library (TeraBox auto-sync when connected, local disk fallback otherwise)
+  app.get('/api/storage/status', requireAuth, (_req: AuthenticatedRequest, res: Response) => {
+    const databaseConfigured = Boolean(databasePool);
+    const objectStorageConfigured = Boolean(getNeonObjectStorageClient());
+    res.json({
+      configured: databaseConfigured && objectStorageConfigured,
+      database: databaseConfigured ? 'Neon Postgres' : 'not-configured',
+      files: objectStorageConfigured ? 'Neon Object Storage' : 'not-configured',
+      bucket: objectStorageConfigured ? NEON_STORAGE_BUCKET : null,
+    });
+  });
+
+  // Cloud Game Library. New uploads use the private Neon Object Storage bucket.
   app.get('/api/library', requireAuth, (req: AuthenticatedRequest, res: Response) => {
     const all = readJson<LibraryGameRecord[]>(LIBRARY_FILE, []);
     const mine = all
@@ -1102,19 +1206,30 @@ async function startServer() {
         return;
       }
 
-      const tbCfg = getTeraBoxConfig();
-      const tbConnected = tbCfg.configured && Boolean(getTeraBoxRecord(req.user!.id));
-
-      if (tbConnected) {
+      const objectStore = getNeonObjectStorageClient();
+      if (objectStore) {
+        const storageKey = buildNeonStorageKey(req.user!.id, gameId, fileName);
         try {
-          const uploaded = await teraboxUploadRomBuffer(req.user!.id, gameId, fileName, req.body);
-          const record = await withDataLock(() => {
+          await objectStore.send(
+            new PutObjectCommand({
+              Bucket: NEON_STORAGE_BUCKET,
+              Key: storageKey,
+              Body: req.body,
+              ContentType: 'application/octet-stream',
+            })
+          );
+
+          const saved = await withDataLock(async () => {
             const all = readJson<LibraryGameRecord[]>(LIBRARY_FILE, []);
             const existingIdx = all.findIndex(
               (g) => g.userId === req.user!.id && g.gameId === gameId
             );
+            const previousStorageKey =
+              existingIdx >= 0 && all[existingIdx].storageProvider === 'neon'
+                ? all[existingIdx].storageKey
+                : undefined;
             const now = Date.now();
-            const rec: LibraryGameRecord = {
+            const record: LibraryGameRecord = {
               id: existingIdx >= 0 ? all[existingIdx].id : crypto.randomUUID(),
               userId: req.user!.id,
               gameId,
@@ -1125,36 +1240,45 @@ async function startServer() {
               fileSize: req.body.length,
               addedAt: existingIdx >= 0 ? all[existingIdx].addedAt : now,
               lastPlayedAt: now,
-              storageProvider: 'terabox',
-              teraboxPath: uploaded.remotePath,
-              teraboxFsId: uploaded.fsId,
+              storageProvider: 'neon',
+              storageKey,
             };
-            if (existingIdx >= 0) all[existingIdx] = rec;
-            else all.push(rec);
-            writeJsonAtomic(LIBRARY_FILE, all);
-            return rec;
+            if (existingIdx >= 0) all[existingIdx] = record;
+            else all.push(record);
+            await writeJsonAtomic(LIBRARY_FILE, all);
+            return { record, previousStorageKey };
           });
-          // Clean up any previous local copy if one existed
+
+          if (saved.previousStorageKey && saved.previousStorageKey !== storageKey) {
+            await deleteNeonStoredObject(saved.previousStorageKey);
+          }
           try {
             const { romPath } = resolveUserRomPath(req.user!.id, gameId);
             if (fs.existsSync(romPath)) fs.unlinkSync(romPath);
           } catch {
-            // ignore
+            // Ignore stale local development copies.
           }
-          res.status(201).json({ game: record });
+          res.status(201).json({ game: saved.record });
           return;
         } catch (err) {
           res.status(502).json({
             error:
               err instanceof Error
-                ? `Erro ao enviar jogo para seu TeraBox: ${err.message}`
-                : 'Falha ao enviar jogo para o TeraBox.',
+                ? `Não foi possível guardar o ficheiro na nuvem RetroHub: ${err.message}`
+                : 'Falha ao enviar o ficheiro para o armazenamento na nuvem.',
           });
           return;
         }
       }
 
-      const saveRes = await withDataLock(() => {
+      if (process.env.NODE_ENV === 'production') {
+        res.status(503).json({
+          error: 'O armazenamento na nuvem ainda não está configurado. O ficheiro não foi guardado.',
+        });
+        return;
+      }
+
+      const saveRes = await withDataLock(async () => {
         const all = readJson<LibraryGameRecord[]>(LIBRARY_FILE, []);
         const userGames = all.filter((g) => g.userId === req.user!.id);
         const existingIdx = all.findIndex(
@@ -1199,7 +1323,7 @@ async function startServer() {
         } else {
           all.push(record);
         }
-        writeJsonAtomic(LIBRARY_FILE, all);
+        await writeJsonAtomic(LIBRARY_FILE, all);
         return { record };
       });
 
@@ -1222,12 +1346,12 @@ async function startServer() {
       return;
     }
 
-    const record = await withDataLock(() => {
+    const record = await withDataLock(async () => {
       const all = readJson<LibraryGameRecord[]>(LIBRARY_FILE, []);
       const found = all.find((g) => g.userId === req.user!.id && g.gameId === gameId);
       if (found) {
         found.lastPlayedAt = Date.now();
-        writeJsonAtomic(LIBRARY_FILE, all);
+        await writeJsonAtomic(LIBRARY_FILE, all);
       }
       return found ?? null;
     });
@@ -1235,6 +1359,32 @@ async function startServer() {
     if (!record) {
       res.status(404).json({ error: 'Jogo não encontrado na sua biblioteca.' });
       return;
+    }
+
+    if (record.storageProvider === 'neon') {
+      try {
+        const objectStore = getNeonObjectStorageClient();
+        if (!objectStore || !record.storageKey) {
+          throw new Error('O armazenamento na nuvem não está configurado ou a referência do ficheiro está em falta.');
+        }
+        const stored = await objectStore.send(
+          new GetObjectCommand({ Bucket: NEON_STORAGE_BUCKET, Key: record.storageKey })
+        );
+        const body = stored.Body as import('node:stream').Readable | undefined;
+        if (!body || typeof body.pipe !== 'function') {
+          throw new Error('O armazenamento não devolveu um ficheiro válido.');
+        }
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Content-Length', String(record.fileSize));
+        res.setHeader('X-File-Name', encodeURIComponent(record.fileName));
+        body.pipe(res);
+        return;
+      } catch (err) {
+        res.status(502).json({
+          error: err instanceof Error ? err.message : 'Erro ao descarregar o ficheiro da nuvem.',
+        });
+        return;
+      }
     }
 
     if (record.storageProvider === 'terabox') {
@@ -1276,18 +1426,20 @@ async function startServer() {
       return;
     }
 
-    const removedRecord = await withDataLock(() => {
+    const removedRecord = await withDataLock(async () => {
       const all = readJson<LibraryGameRecord[]>(LIBRARY_FILE, []);
       const target = all.find((g) => g.userId === req.user!.id && g.gameId === gameId);
       const next = all.filter((g) => !(g.userId === req.user!.id && g.gameId === gameId));
-      writeJsonAtomic(LIBRARY_FILE, next);
+      await writeJsonAtomic(LIBRARY_FILE, next);
       if (fs.existsSync(romPath)) {
         fs.unlinkSync(romPath);
       }
       return target ?? null;
     });
 
-    if (removedRecord?.storageProvider === 'terabox') {
+    if (removedRecord?.storageProvider === 'neon') {
+      await deleteNeonStoredObject(removedRecord.storageKey);
+    } else if (removedRecord?.storageProvider === 'terabox') {
       await teraboxDeleteFileBestEffort(req.user!.id, removedRecord.teraboxPath);
     }
 
