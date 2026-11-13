@@ -215,6 +215,36 @@ async function deleteNeonStoredObject(storageKey?: string) {
   }
 }
 
+async function verifyNeonObjectStorage(client: S3Client) {
+  const key = `system-check/${crypto.randomUUID()}.txt`;
+  const payload = `RetroHub storage check ${Date.now()}`;
+  let uploaded = false;
+
+  try {
+    await client.send(
+      new PutObjectCommand({
+        Bucket: NEON_STORAGE_BUCKET,
+        Key: key,
+        Body: payload,
+        ContentType: 'text/plain',
+      })
+    );
+    uploaded = true;
+
+    const result = await client.send(
+      new GetObjectCommand({ Bucket: NEON_STORAGE_BUCKET, Key: key })
+    );
+    const content = await result.Body?.transformToString();
+    if (content !== payload) {
+      throw new Error('Neon Object Storage read-back verification failed.');
+    }
+  } finally {
+    if (uploaded) {
+      await client.send(new DeleteObjectCommand({ Bucket: NEON_STORAGE_BUCKET, Key: key }));
+    }
+  }
+}
+
 function hashToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
@@ -724,6 +754,7 @@ async function startServer() {
     await objectStore.send(
       new ListObjectsV2Command({ Bucket: NEON_STORAGE_BUCKET, MaxKeys: 1 })
     );
+    await verifyNeonObjectStorage(objectStore);
     neonStorageValidated = true;
   }
 
