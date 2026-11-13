@@ -123,7 +123,7 @@ export const RomLoaderView: React.FC<RomLoaderViewProps> = ({ onLaunchRom }) => 
             : 'Arraste sua ROM aqui ou clique para iniciar automaticamente'}
         </div>
         <p className="text-xs text-slate-400 mt-2 max-w-xl mx-auto">
-          Suporta todos os {CONSOLES.length} emuladores: .nes, .sfc, .smc, .n64, .z64, .gb, .gbc, .gba, .nds, .vb, .iso, .bin, .cue, .md, .sms, .gg, .sg, .32x, .zip (MAME/FBNeo/CPS1/CPS2/DOS), .wad (DOOM), .z80/.tap (ZX Spectrum), .atr/.xex, .d64, .adf, .rom e mais.
+          Suporta os formatos compatíveis com os {CONSOLES.length} sistemas ativos, incluindo .nes, .sfc, .gba, .nds, .iso, .cue, .zip, .wad, .dsk, .adf e outros.
         </p>
       </div>
 
