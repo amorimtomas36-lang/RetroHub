@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main, feat/neon-cloud-storage]
+    branches: [main, feat/neon-cloud-storage, feat/retrohub-ai-center]
 
 permissions:
   contents: read
