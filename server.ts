@@ -746,33 +746,6 @@ async function teraboxDeleteFileBestEffort(userId: string, remotePath?: string):
 async function startServer() {
   ensureStorage();
   await initializeDatabasePersistence();
-  if (databasePool) {
-    await databasePool.query(`
-      CREATE TABLE IF NOT EXISTS public.retrohub_ai_sessions (
-        id UUID PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        mode TEXT NOT NULL CHECK (mode IN ('chat', 'debate')),
-        title TEXT NOT NULL,
-        messages JSONB NOT NULL DEFAULT '[]'::jsonb,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-      CREATE INDEX IF NOT EXISTS retrohub_ai_sessions_user_updated_idx
-        ON public.retrohub_ai_sessions (user_id, updated_at DESC);
-    `);
-  }
-  if (process.env.NODE_ENV === 'production') {
-    const objectStore = getNeonObjectStorageClient();
-    if (!objectStore) {
-      throw new Error('Neon Object Storage credentials are required in production.');
-    }
-    await objectStore.send(
-      new ListObjectsV2Command({ Bucket: NEON_STORAGE_BUCKET, MaxKeys: 1 })
-    );
-    await verifyNeonObjectStorage(objectStore);
-    neonStorageValidated = true;
-  }
-
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
@@ -1265,16 +1238,25 @@ async function startServer() {
   };
   const saveAiSession = async (session: { id: string; userId: string; mode: 'chat' | 'debate'; title: string; messages: Array<{ role: 'user' | 'assistant'; content: string }> }) => {
     const updatedAt = new Date().toISOString();
+    const stored = { ...session, updatedAt };
     if (databasePool) {
+      const stateKey = `ai_sessions:${session.userId}`;
       await databasePool.query(
-        `INSERT INTO public.retrohub_ai_sessions (id, user_id, mode, title, messages, updated_at)
-         VALUES ($1, $2, $3, $4, $5::jsonb, NOW())
-         ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, messages = EXCLUDED.messages, updated_at = NOW()
-         WHERE public.retrohub_ai_sessions.user_id = EXCLUDED.user_id`,
-        [session.id, session.userId, session.mode, session.title, JSON.stringify(session.messages)]
+        `INSERT INTO public.retrohub_state AS existing (state_key, data, updated_at)
+         VALUES ($1, jsonb_build_array($2::jsonb), NOW())
+         ON CONFLICT (state_key) DO UPDATE
+         SET data = (
+           SELECT COALESCE(jsonb_agg(entry), '[]'::jsonb)
+           FROM jsonb_array_elements(
+             CASE WHEN jsonb_typeof(existing.data) = 'array' THEN existing.data ELSE '[]'::jsonb END
+           ) AS item(entry)
+           WHERE item.entry->>'id' <> $3
+         ) || jsonb_build_array($2::jsonb),
+         updated_at = NOW()`,
+        [stateKey, JSON.stringify(stored), session.id]
       );
     } else {
-      aiMemorySessions.set(session.id, { ...session, updatedAt });
+      aiMemorySessions.set(session.id, stored);
     }
   };
 
@@ -1285,16 +1267,16 @@ async function startServer() {
 
   app.get('/api/ai/history', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
     try {
+      let sessions: any[] = [];
       if (databasePool) {
-        const result = await databasePool.query(
-          'SELECT id, mode, title, updated_at FROM public.retrohub_ai_sessions WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 30',
-          [req.user!.id]
-        );
-        res.json({ sessions: result.rows.map((row) => ({ id: row.id, mode: row.mode, title: row.title, updatedAt: new Date(row.updated_at).toISOString() })) });
+        const result = await databasePool.query('SELECT data FROM public.retrohub_state WHERE state_key = $1 LIMIT 1', [`ai_sessions:${req.user!.id}`]);
+        const stored = result.rows[0]?.data;
+        sessions = Array.isArray(stored) ? stored : [];
       } else {
-        const sessions = [...aiMemorySessions.values()].filter((item) => item.userId === req.user!.id).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 30);
-        res.json({ sessions: sessions.map(({ id, mode, title, updatedAt }) => ({ id, mode, title, updatedAt })) });
+        sessions = [...aiMemorySessions.values()].filter((item) => item.userId === req.user!.id);
       }
+      sessions = sessions.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0, 30);
+      res.json({ sessions: sessions.map(({ id, mode, title, updatedAt }) => ({ id, mode, title, updatedAt })) });
     } catch (error) {
       console.error('AI history read failed:', error);
       res.status(503).json({ error: 'Não foi possível carregar o histórico de IA.' });
@@ -1307,13 +1289,14 @@ async function startServer() {
     try {
       let session: any = null;
       if (databasePool) {
-        const result = await databasePool.query('SELECT id, mode, messages FROM public.retrohub_ai_sessions WHERE id = $1 AND user_id = $2 LIMIT 1', [id, req.user!.id]);
-        session = result.rows[0] || null;
+        const result = await databasePool.query('SELECT data FROM public.retrohub_state WHERE state_key = $1 LIMIT 1', [`ai_sessions:${req.user!.id}`]);
+        const stored = result.rows[0]?.data;
+        session = Array.isArray(stored) ? stored.find((item: any) => item.id === id) || null : null;
       } else {
         const found = aiMemorySessions.get(id);
         if (found?.userId === req.user!.id) session = found;
       }
-      if (!session) { res.status(404).json({ error: 'Sessão não encontrada.' }); return; }
+      if (!session || session.userId !== req.user!.id) { res.status(404).json({ error: 'Sessão não encontrada.' }); return; }
       res.json({ session: { id: session.id, mode: session.mode, messages: session.messages } });
     } catch (error) {
       console.error('AI session read failed:', error);
