@@ -5,6 +5,7 @@ import {
   FileUp,
   FolderOpen,
   Gamepad2,
+  Gauge,
   HardDrive,
   LogOut,
   Menu,
@@ -24,6 +25,7 @@ import {
 } from './data/consoles';
 import { AuthPage } from './components/AuthPage';
 import { AIHubView } from './components/AIHubView';
+import { GameOptimizerView } from './components/GameOptimizerView';
 import { ConsolePage } from './components/ConsolePage';
 import { ControlsConfigView } from './components/ControlsConfigView';
 import { ActiveRomSession, EmulatorPlayer } from './components/EmulatorPlayer';
@@ -51,6 +53,7 @@ type AppRoute =
   | { view: 'controls'; consoleId?: string }
   | { view: 'saves' }
   | { view: 'ai' }
+  | { view: 'optimizer' }
   | { view: 'console'; slug: string }
   | { view: 'play'; slug: string };
 
@@ -62,6 +65,7 @@ function parsePathToRoute(pathname: string): AppRoute {
   if (clean === '/controles') return { view: 'controls' };
   if (clean === '/saves') return { view: 'saves' };
   if (clean === '/ia') return { view: 'ai' };
+  if (clean === '/otimizar') return { view: 'optimizer' };
   if (clean.startsWith('/console/')) {
     const slug = clean.slice('/console/'.length);
     if (getConsoleBySlug(slug)) return { view: 'console', slug };
@@ -316,6 +320,7 @@ export default function App() {
 
   const renderMainContent = () => {
     if (route.view === 'ai') return <AIHubView username={user.username} />;
+    if (route.view === 'optimizer') return <GameOptimizerView games={libraryGames} />;
     if (route.view === 'play') {
       if (activeSession) {
         return (
@@ -451,6 +456,14 @@ export default function App() {
               >
                 <BrainCircuit className="w-4 h-4" />
                 Centro Multi-IA
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate('/otimizar', { view: 'optimizer' })}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg border border-emerald-400/30 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20 text-sm font-medium transition-colors whitespace-nowrap"
+              >
+                <Gauge className="w-4 h-4" />
+                Otimizar Jogos
               </button>
               <button
                 type="button"
@@ -674,6 +687,13 @@ export default function App() {
             Centro IA
           </a>
           <a
+            href="/otimizar"
+            onClick={(e) => { e.preventDefault(); navigate('/otimizar', { view: 'optimizer' }); }}
+            className={`hover:text-white transition-colors whitespace-nowrap shrink-0 ${route.view === 'optimizer' ? 'text-white underline underline-offset-8 decoration-emerald-400' : ''}`}
+          >
+            Otimizar Jogos
+          </a>
+          <a
             href="/biblioteca"
             onClick={(e) => {
               e.preventDefault();
@@ -812,6 +832,13 @@ export default function App() {
               className="px-2.5 py-2 rounded-lg bg-white/5 text-slate-200 text-left font-medium"
             >
               Carregar Jogo
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/otimizar', { view: 'optimizer' })}
+              className="px-2.5 py-2 rounded-lg bg-emerald-500/10 text-emerald-200 text-left font-medium"
+            >
+              Otimizar Jogos
             </button>
             <button
               type="button"
