@@ -28,15 +28,14 @@ import { ActiveRomSession, EmulatorPlayer } from './components/EmulatorPlayer';
 import { LibraryView } from './components/LibraryView';
 import { RomLoaderView } from './components/RomLoaderView';
 import { SaveManagerView } from './components/SaveManagerView';
-import { TeraBoxConnectModal } from './components/TeraBoxConnectModal';
 import {
   AuthUser,
   LibraryGameItem,
-  TeraBoxStatus,
+  StorageStatus,
   downloadSavedLibraryRom,
   fetchCurrentUser,
   fetchSavedLibrary,
-  fetchTeraBoxStatus,
+  fetchStorageStatus,
   logoutAccount,
   saveGameToLibrary,
 } from './utils/api';
@@ -83,8 +82,7 @@ export default function App() {
 
   const [libraryGames, setLibraryGames] = useState<LibraryGameItem[]>([]);
   const [libraryLoading, setLibraryLoading] = useState(false);
-  const [teraboxStatus, setTeraboxStatus] = useState<TeraBoxStatus | null>(null);
-  const [teraboxModalOpen, setTeraboxModalOpen] = useState(false);
+  const [storageStatus, setStorageStatus] = useState<StorageStatus | null>(null);
   const [openingSavedId, setOpeningSavedId] = useState<string | null>(null);
   const [libraryNotice, setLibraryNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(
     null
@@ -121,12 +119,12 @@ export default function App() {
     }
   }, []);
 
-  const refreshTeraBox = useCallback(async () => {
+  const refreshStorage = useCallback(async () => {
     try {
-      const status = await fetchTeraBoxStatus();
-      setTeraboxStatus(status);
+      const status = await fetchStorageStatus();
+      setStorageStatus(status);
     } catch {
-      setTeraboxStatus(null);
+      setStorageStatus(null);
     }
   }, []);
 
@@ -161,14 +159,14 @@ export default function App() {
     if (user) {
       setIndexedDbUserScope(user.id);
       refreshLibrary();
-      refreshTeraBox();
+      refreshStorage();
     } else {
       setIndexedDbUserScope(null);
       setLibraryGames([]);
-      setTeraboxStatus(null);
+      setStorageStatus(null);
       setActiveSession(null);
     }
-  }, [user, refreshLibrary, refreshTeraBox]);
+  }, [user, refreshLibrary, refreshStorage]);
 
   const navigate = (path: string, nextRoute?: AppRoute) => {
     if (typeof window !== 'undefined' && window.location.pathname !== path) {
@@ -186,7 +184,7 @@ export default function App() {
     const onUnauthorized = () => {
       setIndexedDbUserScope(null);
       setUser(null);
-      setTeraboxStatus(null);
+      setStorageStatus(null);
       setActiveSession(null);
     };
     window.addEventListener('popstate', onPopState);
@@ -347,13 +345,11 @@ export default function App() {
         <LibraryView
           games={libraryGames}
           loading={libraryLoading}
-          teraboxStatus={teraboxStatus}
+          storageStatus={storageStatus}
           onPlaySavedGame={(file, consoleDef, gameId) =>
             handleLaunchRom(file, consoleDef, gameId, true)
           }
           onRefreshLibrary={refreshLibrary}
-          onRefreshTeraBox={refreshTeraBox}
-          onOpenTeraBoxModal={() => setTeraboxModalOpen(true)}
           onGoToUpload={() => navigate('/carregar-jogo', { view: 'loader' })}
         />
       );
@@ -449,19 +445,13 @@ export default function App() {
                 <Settings className="w-4 h-4" />
                 Configurar Controles
               </button>
-              <button
+                            <button
                 type="button"
-                onClick={() => setTeraboxModalOpen(true)}
-                className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-lg border text-sm font-medium transition-colors whitespace-nowrap ${
-                  teraboxStatus?.connected
-                    ? 'border-sky-500/40 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20'
-                    : 'border-white/15 text-slate-200 hover:text-white hover:bg-white/5'
-                }`}
+                onClick={() => navigate('/biblioteca', { view: 'library' })}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg border border-sky-500/40 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20 text-sm font-medium transition-colors whitespace-nowrap"
               >
                 <Cloud className="w-4 h-4" />
-                {teraboxStatus?.connected
-                  ? `TeraBox: ${teraboxStatus.account?.uname || 'Conectado'}`
-                  : 'Conectar TeraBox (1 TB Grátis)'}
+                {storageStatus?.configured ? 'Nuvem RetroHub ativa' : 'Ver armazenamento na nuvem'}
               </button>
             </div>
           </div>
@@ -763,29 +753,17 @@ export default function App() {
               </button>
             </div>
 
-            <button
+                        <button
               type="button"
-              onClick={() => setTeraboxModalOpen(true)}
-              className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border text-[11px] font-medium transition-colors ${
-                teraboxStatus?.connected
-                  ? 'border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20'
-                  : 'border-white/10 bg-[#0B0D12] text-slate-300 hover:text-white hover:border-sky-500/40'
-              }`}
+              onClick={() => navigate('/biblioteca', { view: 'library' })}
+              className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20 text-[11px] font-medium transition-colors"
             >
               <span className="inline-flex items-center gap-1.5 min-w-0 truncate">
                 <Cloud className="w-3.5 h-3.5 shrink-0 text-sky-400" />
-                <span className="truncate">
-                  {teraboxStatus?.connected
-                    ? `TeraBox: ${teraboxStatus.account?.uname || 'Conectado'}`
-                    : 'Conectar TeraBox (Nuvem)'}
-                </span>
+                <span className="truncate">Armazenamento RetroHub</span>
               </span>
-              <span
-                className={`text-[10px] shrink-0 ${
-                  teraboxStatus?.connected ? 'text-emerald-400' : 'text-sky-400'
-                }`}
-              >
-                {teraboxStatus?.connected ? 'Ativo' : '1 TB'}
+              <span className="text-[10px] shrink-0">
+                {storageStatus?.configured ? 'Ativo' : 'A verificar'}
               </span>
             </button>
           </div>
@@ -932,19 +910,7 @@ export default function App() {
         </main>
       </div>
 
-      <TeraBoxConnectModal
-        open={teraboxModalOpen}
-        status={teraboxStatus}
-        onClose={() => setTeraboxModalOpen(false)}
-        onConnected={async () => {
-          await Promise.all([refreshTeraBox(), refreshLibrary()]);
-          showLibraryNotice(
-            'ok',
-            'TeraBox conectado! Todos os jogos enviados agora serão salvos na sua nuvem TeraBox.',
-            4500
-          );
-        }}
-      />
+
     </div>
   );
 }
