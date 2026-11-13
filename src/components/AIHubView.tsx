@@ -3,7 +3,7 @@ import { Bot, BrainCircuit, CircleAlert, Loader2, MessageSquare, RefreshCw, Send
 
 type Message = { role: 'user' | 'assistant'; content: string };
 type HistoryItem = { id: string; mode: 'chat' | 'debate'; title: string; updatedAt: string };
-type AiStatus = { configured: boolean; provider: string; defaultModel: string; models: string[]; storage: string };
+type AiStatus = { configured: boolean; connected: boolean; providerMessage: string; provider: string; defaultModel: string; models: string[]; storage: string };
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, { ...init, credentials: 'include', headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) } });
@@ -24,16 +24,21 @@ export function AIHubView({ username }: { username: string }) {
   const [sessionId, setSessionId] = useState('');
 
   const refresh = useCallback(async () => {
-    try {
-      const [s, h] = await Promise.all([
-        api<AiStatus>('/api/ai/status'),
-        api<{ sessions: HistoryItem[] }>('/api/ai/history')
-      ]);
+    const [statusResult, historyResult] = await Promise.allSettled([
+      api<AiStatus>('/api/ai/status'),
+      api<{ sessions: HistoryItem[] }>('/api/ai/history')
+    ]);
+    if (statusResult.status === 'fulfilled') {
+      const s = statusResult.value;
       setStatus(s);
-      setHistory(h.sessions);
       setModel((current) => current || s.defaultModel || s.models[0] || '');
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Erro ao carregar o centro de IA.');
+    } else {
+      setNotice(statusResult.reason instanceof Error ? statusResult.reason.message : 'Erro ao verificar o motor de IA.');
+    }
+    if (historyResult.status === 'fulfilled') {
+      setHistory(historyResult.value.sessions);
+    } else {
+      setNotice(historyResult.reason instanceof Error ? historyResult.reason.message : 'Erro ao carregar o histórico.');
     }
   }, []);
 
@@ -110,7 +115,18 @@ export function AIHubView({ username }: { username: string }) {
           {!status?.configured && (
             <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
               <div className="mb-1 flex items-center gap-2 font-semibold"><CircleAlert className="h-4 w-4"/> Motor de IA ainda não configurado</div>
-              O site já tem a interface e a API preparadas. Para ativar, é necessário configurar no servidor uma chave de fornecedor de IA e, opcionalmente, a URL de uma API compatível com OpenAI. A chave nunca é enviada ao navegador.
+              Falta uma chave de fornecedor de IA válida nas variáveis privadas do servidor. A chave nunca é enviada ao navegador.
+            </div>
+          )}
+          {status?.configured && !status.connected && (
+            <div role="status" className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
+              <div className="mb-1 flex items-center gap-2 font-semibold"><CircleAlert className="h-4 w-4"/> Ligação ao motor de IA não confirmada</div>
+              {status.providerMessage}
+            </div>
+          )}
+          {status?.connected && (
+            <div role="status" className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3 text-xs text-emerald-200">
+              {status.providerMessage}
             </div>
           )}
 
@@ -150,8 +166,8 @@ export function AIHubView({ username }: { username: string }) {
           <section className="rounded-2xl border border-white/10 bg-[#11151e] p-4">
             <h2 className="mb-3 flex items-center gap-2 text-sm font-bold text-white"><ShieldCheck className="h-4 w-4 text-emerald-400"/> Estado do sistema</h2>
             <div className="space-y-2 text-xs">
-              <div className="flex justify-between gap-2"><span className="text-slate-400">Motor IA</span><span className={status?.configured ? 'text-emerald-300' : 'text-amber-300'}>{status?.configured ? 'Configurado' : 'Pendente'}</span></div>
-              <div className="flex justify-between gap-2"><span className="text-slate-400">Histórico</span><span className="text-slate-200">{status?.storage || 'A verificar'}</span></div>
+              <div className="flex justify-between gap-2"><span className="text-slate-400">Motor IA</span><span className={status?.connected ? 'text-emerald-300' : 'text-amber-300'}>{status?.connected ? 'Ligado' : 'Pendente'}</span></div>
+              <div className="flex justify-between gap-2"><span className="text-slate-400">Histórico</span><span className={status?.storage === 'Neon Postgres' ? 'text-emerald-300' : 'text-amber-300'}>{status?.storage || 'A verificar'}</span></div>
               <div className="flex justify-between gap-2"><span className="text-slate-400">Sessão</span><span className="text-slate-200">Privada</span></div>
             </div>
             <button onClick={() => void refresh()} className="mt-4 inline-flex items-center gap-2 text-xs text-violet-300 hover:text-violet-200"><RefreshCw className="h-3.5 w-3.5"/> Atualizar estado</button>
